@@ -2,6 +2,7 @@ import yt_dlp
 import cv2
 import random
 import os
+import numpy as np
 
 def download_youtube_videos(urls: list, output_dir: str = "videos") -> list:
     """
@@ -33,7 +34,7 @@ def download_youtube_videos(urls: list, output_dir: str = "videos") -> list:
     return downloaded_paths
 
 
-def extract_random_frames(video_paths: list, output_dir: str, num_frames: int):
+def extract_random_frames(video_paths: list, output_dir: str, num_frames: int, sharpness_threshold: float = 100.0):
     """
     Extract `num_frames` random frames from each video in `video_paths`
     and save them directly into `output_dir.
@@ -42,17 +43,31 @@ def extract_random_frames(video_paths: list, output_dir: str, num_frames: int):
 
     for video_path in video_paths:
         cap = cv2.VideoCapture(video_path)
+
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         video_name = os.path.splitext(os.path.basename(video_path))[0]
 
-        for i in range(num_frames):
+        saved_frames_count = 0
+        max_attempts = num_frames * 5 
+        attempts = 0
+
+        while saved_frames_count < num_frames and attempts < max_attempts:
             frame_id = random.randint(0, total_frames - 1)
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
             success, frame = cap.read()
-            if success:
-                filename = os.path.join(output_dir, f"{video_name}_frame_{i+1}.jpg")
-                cv2.imwrite(filename, frame)
 
+            if success:
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                laplacian_var = cv2.Laplacian(gray_frame, cv2.CV_64F).var()
+                
+                if laplacian_var > sharpness_threshold:
+                    saved_frames_count += 1
+                    filename = os.path.join(output_dir, f"{video_name}_frame_{saved_frames_count}.jpg")
+                    cv2.imwrite(filename, frame)
+            
+            attempts += 1
+    
         cap.release()
 
 
@@ -65,10 +80,13 @@ if __name__ == "__main__":
         "https://www.youtube.com/watch?v=hFrIVlkTDMs",
     ]
 
+     # Official highligts of the seasons 2024
     test_url = ["https://www.youtube.com/watch?v=_e2tSzsuark"]
 
     train_videos_path = "Data/train_videos"
-    file_paths = [os.path.join(train_videos_path, f) for f in os.listdir(train_videos_path) if os.path.isfile(os.path.join(train_videos_path, f))]
+    train_file_paths = [os.path.join(train_videos_path, f) for f in os.listdir(train_videos_path) if os.path.isfile(os.path.join(train_videos_path, f))]
     
-    extract_random_frames(file_paths, "Data/train_images", 500)
-    #extract_random_frames(b, "Data/test_images", 100)
+    extract_random_frames(video_paths=train_file_paths, 
+                          output_dir="Data/train_images", 
+                          num_frames=500,
+                          sharpness_threshold=200)
