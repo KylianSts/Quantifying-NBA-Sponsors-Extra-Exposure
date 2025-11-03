@@ -4,7 +4,7 @@ import random
 import os
 import numpy as np
 
-def download_youtube_videos(urls: list, output_dir: str = "videos") -> list:
+def download_youtube_videos(urls: list, output_dir: str) -> list:
     """
     Download multiple YouTube videos given a list of URLs.
     Returns a list of downloaded video file paths.
@@ -15,14 +15,9 @@ def download_youtube_videos(urls: list, output_dir: str = "videos") -> list:
     for url in urls:
         ydl_opts = {
             'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
-            'format': 'bestvideo+bestaudio/best',
-            'quiet': True,
-            'merge_output_format': 'mp4',
-            'cookiesfrombrowser': ['firefox'],
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-            },
-         }
+            'format': 'best[ext=mp4]/best',
+            'extractor_args': {'youtube': {'player_client': ['android']}},
+        }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -80,13 +75,22 @@ if __name__ == "__main__":
         "https://www.youtube.com/watch?v=hFrIVlkTDMs",
     ]
 
-     # Official highligts of the seasons 2024
+    # Official highligts of the seasons 2024
     test_url = ["https://www.youtube.com/watch?v=_e2tSzsuark"]
 
     train_videos_path = "Data/train_videos"
     train_file_paths = [os.path.join(train_videos_path, f) for f in os.listdir(train_videos_path) if os.path.isfile(os.path.join(train_videos_path, f))]
     
-    extract_random_frames(video_paths=train_file_paths, 
+    train_paths = download_youtube_videos(taining_urls, "Data/train_videos")
+
+    extract_random_frames(video_paths=train_paths, 
                           output_dir="Data/train_images", 
                           num_frames=500,
-                          sharpness_threshold=200)
+                          sharpness_threshold=150)
+    
+    test_paths = download_youtube_videos(test_url, "Data/test_videos")
+
+    extract_random_frames(video_paths=test_paths, 
+                          output_dir="Data/test_images", 
+                          num_frames=500,
+                          sharpness_threshold=150)
