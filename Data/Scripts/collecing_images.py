@@ -11,7 +11,7 @@ def process_single_video(url: str, output_dir: str, num_frames: int, sharpness_t
     try:
         ydl_opts = {
             'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
-            'format': 'best[ext=mp4]/best',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'extractor_args': {'youtube': {'player_client': ['android']}},
            # 'cookiesfrombrowser': ('firefox',)
         }
@@ -41,7 +41,7 @@ def process_single_video(url: str, output_dir: str, num_frames: int, sharpness_t
                 
                 if laplacian_var > sharpness_threshold:
                     saved_frames_count += 1
-                    frame_filename = os.path.join(output_dir, f"{video_id}_frame_{saved_frames_count}.jpg")
+                    frame_filename = os.path.join(output_dir, f"{video_id}_frame_{saved_frames_count}.png")
                     cv2.imwrite(frame_filename, frame)
             
             attempts += 1
@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
     download_and_extract_frames(urls=train_urls,
                                 output_dir="Data/train_images",
-                                num_frames=10,
+                                num_frames=5,
                                 sharpness_threshold=150,
                                 max_workers=32)
     
@@ -91,7 +91,7 @@ if __name__ == "__main__":
         test_urls = [line.strip() for line in f.readlines()]
 
     download_and_extract_frames(urls=test_urls,
-                                output_dir="Data/test_images",
-                                num_frames=10,
+                                output_dir="Data/test_qualite",
+                                num_frames=5,
                                 sharpness_threshold=150,
                                 max_workers=32)
