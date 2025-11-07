@@ -4,17 +4,17 @@ from ultralytics import YOLO
 # Model selection
 MODEL_TO_USE = 'Models/yolo/yolov8m-obb.pt'
 
-# Path to dataset configuration file (created by create_yolo_dataset.py)
+# Path to dataset configuration file 
 DATASET_YAML_PATH = 'Data/yolo_dataset/nba_sponsor_dataset.yaml'
 
 # Training hyperparameters
-EPOCHS = 1           
+EPOCHS = 100           
 IMAGE_SIZE = 640       
 BATCH_SIZE = 8  
 
 # Output directories for training results
-PROJECT_NAME = 'Models/NBA_Sponsor_Detection'
-EXPERIMENT_NAME = 'yolov8m-obb_fine_tuned_v1'
+PROJECT_NAME = 'Models/models_results'
+EXPERIMENT_NAME = 'yolov8m-obb_fine_tuned_v2'
 
 def train_yolo_model(
     model_path: str,
