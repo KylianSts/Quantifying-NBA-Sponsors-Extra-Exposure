@@ -113,7 +113,7 @@ def download_and_extract_frames(urls: list, output_dir: str, num_frames: int, sh
 if __name__ == "__main__":
 
     # Load training video URLs from file
-    with open('Data/train_urls.txt', 'r') as f:
+    with open('Data/urls/train_urls.txt', 'r') as f:
         train_urls = [line.strip() for line in f.readlines()]
 
     # Extract frames from training videos
@@ -124,7 +124,7 @@ if __name__ == "__main__":
                                 max_workers=32)  # Number of videos processed simultaneously
     
     # Load test video URLs from file
-    with open('Data/test_urls.txt', 'r') as f:
+    with open('Data/urls/test_urls.txt', 'r') as f:
         test_urls = [line.strip() for line in f.readlines()]
 
     # Extract frames from test videos

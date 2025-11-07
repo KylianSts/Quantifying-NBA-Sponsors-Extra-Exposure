@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # Get training set URLs (videos from Nov 2024 to May 2025)
     train_urls = get_video_urls(
         channel_url=CHANNEL_URL,
-        outputdir='Data/train_urls.txt',
+        outputdir='Data/urls/train_urls.txt',
         start_date=START_DATE_TRAIN,
         end_date=END_DATE_TRAIN,
         min_duration_secs=MINIMUM_DURATION,
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     # Get test set URLs (videos from Oct 2025 to Dec 2025)
     test_urls = get_video_urls(
         channel_url=CHANNEL_URL,
-        outputdir='Data/test_urls.txt',
+        outputdir='Data/urls/test_urls.txt',
         start_date=START_DATE_TEST,
         end_date=END_DATE_TEST,
         min_duration_secs=MINIMUM_DURATION,

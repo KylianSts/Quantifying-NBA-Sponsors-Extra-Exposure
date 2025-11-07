@@ -10,8 +10,8 @@ from tqdm import tqdm
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-JSON_SOURCE_FILE = "Data/abcd.json"
-SOURCE_IMAGES_DIR = "Data/train_images"
+JSON_SOURCE_FILE = "Data/yolo_label_studio.json"
+SOURCE_IMAGES_DIR = "Data/images/train_images"
 YOLO_DATASET_DIR = "Data/yolo_dataset" 
 VALIDATION_SPLIT_RATIO = 0.2
 

@@ -16,10 +16,10 @@ MODEL_NAME = "yolov8m-obb_fine_tuned_v1"
 MODEL_PATH = f"Models/NBA_Sponsor_Detection/{MODEL_NAME}/weights/best.pt"
 
 # Directory containing images to auto-label
-IMAGES_TO_LABEL_DIR = "Data/train_images"
+IMAGES_TO_LABEL_DIR = "Data/images/train_images"
 
 # Output JSON file for Label Studio import
-LABEL_STUDIO_JSON_OUTPUT = f"Data/prelabeled_tasks_{MODEL_NAME}.json"
+LABEL_STUDIO_JSON_OUTPUT = f"Data/json_files/prelabeled_tasks_{MODEL_NAME}.json"
 
 # Number of random images to process from the directory
 NUM_RANDOM_IMAGES = 3000
