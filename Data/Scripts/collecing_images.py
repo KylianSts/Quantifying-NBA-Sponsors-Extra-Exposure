@@ -116,12 +116,19 @@ if __name__ == "__main__":
     with open('Data/urls/train_urls.txt', 'r') as f:
         train_urls = [line.strip() for line in f.readlines()]
 
-    # Extract frames from training videos
+    # Extract frames from training videos (highlights from 2024/2025 seasons)
     download_and_extract_frames(urls=train_urls,
-                                output_dir="Data/train_images",
+                                output_dir="Data/images/train_images",
                                 num_frames=5,  # Extract 5 frames per video
-                                sharpness_threshold=150,  # Minimum sharpness score (higher = sharper)
+                                sharpness_threshold=150,  # Minimum sharpness score
                                 max_workers=32)  # Number of videos processed simultaneously
+    
+    # Add 1000 images from 2023 2 hours highlights 
+    download_and_extract_frames(urls=["https://www.youtube.com/watch?v=YX13nYVV9iM"],
+                                output_dir="Data/images/train_images",
+                                num_frames=11000,  
+                                sharpness_threshold=150,  
+                                max_workers=32) 
     
     # Load test video URLs from file
     with open('Data/urls/test_urls.txt', 'r') as f:
@@ -129,7 +136,7 @@ if __name__ == "__main__":
 
     # Extract frames from test videos
     download_and_extract_frames(urls=test_urls,
-                                output_dir="Data/test_images",
+                                output_dir="Data/images/test_images",
                                 num_frames=5,
                                 sharpness_threshold=150,
                                 max_workers=32)
