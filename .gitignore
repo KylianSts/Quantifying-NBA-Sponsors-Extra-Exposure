@@ -8,4 +8,5 @@ Data/yolo_dataset
 
 # Yolo models
 Models/yolo
+Models\models_results\yolov8x-obb_fine_tuned_v5\weights
 
