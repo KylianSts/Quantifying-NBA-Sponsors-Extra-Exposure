@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
-MODEL_PATH = "Models/models_results/yolov8s-obb_fine_tuned_v6/weights/best.pt"
+MODEL_PATH = "Models/models_results/modelisation_v6/yolov8s-obb_fine_tuned_v6/weights/best.pt"
 URLS_INPUT_CSV = "Data/urls/game_highlight_urls.csv"
 OUTPUT_CSV_PATH = "Data/exposure_results_final.csv"
 TEMP_VIDEO_DIR = "temp_videos"
