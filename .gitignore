@@ -5,8 +5,10 @@ label_studio.venv
 # Heavy data
 Data/images
 Data/yolo_dataset
+Data/demonstration_video.mp4
 
 # Yolo models
 Models/yolo
 Models\models_results\yolov8x-obb_fine_tuned_v5\weights
+Models\models_results\yolov8l-obb_fine_tuned_v6\weights
 
