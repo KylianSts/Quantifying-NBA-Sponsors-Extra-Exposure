@@ -1,5 +1,6 @@
 # Environments 
-environments/
+nba_sponsor.venv
+test.venv
 
 # Heavy data
 Data/images
@@ -8,6 +9,4 @@ Data/demonstration_video.mp4
 
 # Yolo models
 Models/yolo
-Models\models_results\yolov8x-obb_fine_tuned_v5\weights
-Models\models_results\yolov8l-obb_fine_tuned_v6\weights
-
+Models\models_results\modelisation_v5\yolov8x-obb_fine_tuned_v5\weights
