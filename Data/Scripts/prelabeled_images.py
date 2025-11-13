@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 # Model configuration (trained YOLO model to use for auto-labeling)
 MODEL_NAME = "yolov8l-obb_fine_tuned_v4"
-MODEL_PATH = f"Models/models_results/{MODEL_NAME}/weights/best.pt"
+MODEL_PATH = f"Models/models_results/modelisation_v4/{MODEL_NAME}/weights/best.pt"
 
 # Directory paths
 IMAGES_TO_LABEL_DIR = "Data/images/train_images"  # Directory containing images to auto-label
