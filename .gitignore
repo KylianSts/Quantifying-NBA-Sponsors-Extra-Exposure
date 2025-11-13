@@ -1,6 +1,5 @@
 # Environments 
-nba_sponsor.venv
-label_studio.venv
+environments/
 
 # Heavy data
 Data/images
