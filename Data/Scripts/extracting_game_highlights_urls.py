@@ -39,7 +39,7 @@ URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls.csv"
 MAX_RESULTS_PER_QUERY = 10
 
 # Delay between searches per thread to avoid YouTube rate-limiting (in seconds)
-SEARCH_DELAY = 0.5
+SEARCH_DELAY = 0.1
 
 # Number of parallel threads for simultaneous video searching
 MAX_WORKERS = 32
@@ -47,10 +47,44 @@ MAX_WORKERS = 32
 # Enable detailed logging of rejected videos with reasons
 DEBUG_REJECTIONS = True 
 
-# Blacklist of channel names to exclude from results (channels known for low-quality content)
-CHANNEL_BLACKLIST = {
-    # Add channel names here in lowercase, e.g., 'spam_channel'
-}
+# Blacklist official channel names to exclude from results
+CHANNEL_BLACKLIST = [
+    "Prime Video Sport France",
+    "NBA Europe",
+    "NBA G League",
+    "NBA Extra - beIN SPORTS France",
+    "NBA",
+    "Atlanta Hawks",
+    "Boston Celtics",
+    "Brooklyn Nets",
+    "Charlotte Hornets",
+    "Chicago Bulls",
+    "Cleveland Cavaliers",
+    "Dallas Mavericks",
+    "Denver Nuggets",
+    "Detroit Pistons",
+    "Golden State Warriors",
+    "Houston Rockets",
+    "Indiana Pacers",
+    "LA Clippers",
+    "Los Angeles Lakers",
+    "Memphis Grizzlies",
+    "Miami Heat",
+    "Milwaukee Bucks",
+    "Minnesota Timberwolves",
+    "New Orleans Pelicans",
+    "New York Knicks",
+    "Oklahoma City Thunder",
+    "Orlando Magic",
+    "Philadelphia 76ers",
+    "Phoenix Suns",
+    "Portland Trail Blazers",
+    "Sacramento Kings",
+    "San Antonio Spurs",
+    "Toronto Raptors",
+    "Utah Jazz",
+    "Washington Wizards"
+]
 
 # ============================================================================
 # CORE FUNCTIONS
@@ -234,7 +268,7 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     duration = video.get('duration', 0)
     if duration < 60:  # Less than 1 minute is likely a teaser or ad
         return f"Rejected (Too Short: {int(duration)}s)"
-    if duration > 900:  # More than 15 minutes is likely a full game, not highlights
+    if duration > 900:  # More than 15 minutes is likely not highlights
         return f"Rejected (Too Long: {int(duration)}s)"
     
     # Combine title and description for comprehensive text analysis
@@ -242,24 +276,22 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     
     # Check if video mentions the game date (game day or next day upload)
     game_date = game_info['game_date_dt']
-    next_day_date = game_date + timedelta(days=1)  # Highlights often uploaded day after
     
     # Build regex patterns for both full month names and abbreviations
     date_patterns = []
-    for d in [game_date, next_day_date]:
-        month_full = d.strftime('%B').lower()  # e.g., "January"
-        month_abbr = d.strftime('%b').lower()  # e.g., "Jan"
-        day = str(d.day)  # e.g., "15"
+    month_full = game_date.strftime('%B').lower()  # e.g., "January"
+    month_abbr = game_date.strftime('%b').lower()  # e.g., "Jan"
+    day = str(game_date.day)  # e.g., "15"
         
-        # Create patterns for "Month Day" and "Day Month" formats
-        date_patterns.extend([
-            rf'({month_full}|{month_abbr})\s+{day}',  # "January 15" or "Jan 15"
-            rf'{day}\s+({month_full}|{month_abbr})'   # "15 January" or "15 Jan"
-        ])
+    # Create patterns for "Month Day" and "Day Month" formats
+    date_patterns.extend([
+        rf'({month_full}|{month_abbr})\s+{day}',  # "January 15" or "Jan 15"
+        rf'{day}\s+({month_full}|{month_abbr})'   # "15 January" or "15 Jan"
+    ])
     
     # Reject video if no date pattern matches
     if not any(re.search(pattern, text) for pattern in date_patterns):
-        return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')} or {next_day_date.strftime('%b %d')})"
+        return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')})"
     
     # Video passed all validation checks
     return True
