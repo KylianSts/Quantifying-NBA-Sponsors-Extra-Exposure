@@ -37,10 +37,10 @@ SOURCE_IMAGES_DIR = "Data/images/train_images"
 # Output directory for the YOLO-formatted dataset
 YOLO_DATASET_DIR = "Data/yolo_dataset"
 
-# Proportion of data to use for validation (0.2 = 20% validation, 80% training)
+# Proportion of data to use for validation
 VALIDATION_SPLIT_RATIO = 0.2
 
-# List of object classes in the dataset (order matters - index becomes class ID)
+# List of object classes in the dataset
 CLASS_NAMES = [
     "back-court-logo",       # Class 0: Logos on back court
     "basket-logo",           # Class 1: Logos near baskets
@@ -53,6 +53,7 @@ CLASS_NAMES = [
 # UTILITY FUNCTIONS
 # ============================================================================
 
+##### This function comes from the documentation of label-studio #####
 def get_rotated_points_from_rectangle(value: dict, org_width: int, org_height: int) -> np.ndarray:
     """
     Calculate 4 corners from 'rectanglelabels' format (x, y, width, height, rotation).

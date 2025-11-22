@@ -1,5 +1,5 @@
 """
-YOLO Auto-Labeling for Label Studio (Incremental Processing)
+YOLO Auto-Labeling for Label Studio
 
 This script automatically pre-labels unlabeled images using a trained YOLO model
 and generates Label Studio-compatible JSON files. It intelligently skips images
@@ -27,8 +27,8 @@ from tqdm import tqdm
 # ============================================================================
 
 # Model configuration (trained YOLO model to use for auto-labeling)
-MODEL_NAME = "yolov8l-obb_fine_tuned_v4"
-MODEL_PATH = f"Models/models_results/modelisation_v4/{MODEL_NAME}/weights/best.pt"
+MODEL_NAME = "yolo11m-obb_fine_tuned_v4"
+MODEL_PATH = f"Models/models_results/modelisation_v6/{MODEL_NAME}/weights/best.pt"
 
 # Directory paths
 IMAGES_TO_LABEL_DIR = "Data/images/train_images"  # Directory containing images to auto-label
@@ -36,7 +36,7 @@ EXISTING_LABELS_JSON = "Data/json_files/yolo_label_studio.json"  # Existing anno
 LABEL_STUDIO_JSON_OUTPUT = f"Data/json_files/prelabeled_tasks_{MODEL_NAME}.json"  # Output file
 
 # Auto-labeling parameters
-NUM_RANDOM_IMAGES = 3000  # Maximum number of images to process (None = all unlabeled)
+NUM_RANDOM_IMAGES = None  # Maximum number of images to process (None = all unlabeled)
 CONFIDENCE_THRESHOLD = 0.0  # Minimum confidence for predictions (0.0 = include all predictions)
 GCS_BASE_URL = "gs://yolo_nba_sponsor/train_images"  # Cloud storage base URL for Label Studio
 
@@ -155,7 +155,6 @@ def predict_on_image(model: YOLO, image_path: str) -> Tuple:
         - image_width: Original image width in pixels
         - image_height: Original image height in pixels
     """
-    # Run inference with verbose=False to suppress per-image output
     results = model(image_path, verbose=False)
     result = results[0]  # Get first (and only) result
     
@@ -237,7 +236,7 @@ def create_label_studio_task(
     image_filename: str,
     annotations: List[Dict],
     gcs_base_url: str,
-    model_version: str = "yolov8m-obb-v1"
+    model_version: str
 ) -> Dict:
     """
     Create a Label Studio task dictionary for a single image.
@@ -260,7 +259,7 @@ def create_label_studio_task(
         },
         "predictions": [{
             "model_version": model_version,  # Track which model made these predictions
-            "score": 0.0,  # Overall task score (not used in this workflow)
+            "score": 0.0,  # Overall task score
             "result": annotations  # List of predicted bounding boxes
         }]
     }
@@ -379,7 +378,7 @@ def auto_label_new_images(
         
         # Convert YOLO predictions to Label Studio format
         annotations = convert_obb_to_label_studio(
-            obb_predictions=result.obb,  # OBB predictions (oriented bounding boxes)
+            obb_predictions=result.obb,  # OBB predictions
             class_names=model.names,  # Class ID to name mapping
             image_width=img_width,
             image_height=img_height,

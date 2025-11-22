@@ -1,5 +1,5 @@
 """
-YouTube Channel Video URL Filter (Parallel & Date-Filtered Version)
+YouTube Channel Video URL Filter
 
 This script extracts video URLs from a YouTube channel and filters them based on
 upload date and duration criteria. It's optimized for speed using parallel processing

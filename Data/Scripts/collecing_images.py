@@ -1,5 +1,5 @@
 """
-YouTube Video Frame Extractor (Parallel & Quality-Filtered Version)
+YouTube Video Frame Extractor
 
 This script automates the extraction of high-quality frames from YouTube videos
 for use in machine learning datasets. It downloads videos, analyzes frame sharpness,
@@ -43,8 +43,8 @@ def process_single_video(url: str, output_dir: str, num_frames: int, sharpness_t
         ydl_opts = {
             'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),  # Output template for filename
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',  # Best video+audio quality
-            'extractor_args': {'youtube': {'player_client': ['android']}},  # Use android client to avoid restrictions
-           # 'cookiesfrombrowser': ('firefox',)  # Uncomment to use browser cookies if needed
+            'extractor_args': {'youtube': {'player_client': ['android']}},  # Android client to avoid restrictions
+            # 'cookiesfrombrowser': ('firefox',)
         }
         
         # Download the video and get metadata
@@ -66,16 +66,16 @@ def process_single_video(url: str, output_dir: str, num_frames: int, sharpness_t
 
         # Extract random sharp frames until we get enough or reach max attempts
         while saved_frames_count < num_frames and attempts < max_attempts:
-            # Select a random frame from the video (uniform distribution)
+            # Select a random frame from the video
             frame_id = random.randint(0, total_frames - 1)
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)  # Seek to the random frame
             success, frame = cap.read()
 
             if success:
-                # Convert frame to grayscale for sharpness analysis (Laplacian works on single channel)
+                # Convert frame to grayscale for sharpness analysis
                 gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-                # Calculate sharpness using Laplacian variance (higher = sharper)
+                # Calculate sharpness using Laplacian variance
                 # Laplacian detects edges; high variance means many sharp edges
                 laplacian_var = cv2.Laplacian(gray_frame, cv2.CV_64F).var()
                 
@@ -83,7 +83,7 @@ def process_single_video(url: str, output_dir: str, num_frames: int, sharpness_t
                 if laplacian_var > sharpness_threshold:
                     saved_frames_count += 1
                     frame_filename = os.path.join(output_dir, f"{video_id}_frame_{saved_frames_count}.png")
-                    cv2.imwrite(frame_filename, frame)  # Save as PNG (lossless quality)
+                    cv2.imwrite(frame_filename, frame)
             
             attempts += 1
     
@@ -126,7 +126,7 @@ def download_and_extract_frames(urls: list, output_dir: str, num_frames: int, sh
             for url in urls
         }
         
-        # Process results as they complete (not necessarily in submission order)
+        # Process results as they complete
         for future in as_completed(futures):
             url = futures[future]
             try:
@@ -144,7 +144,7 @@ def download_and_extract_frames(urls: list, output_dir: str, num_frames: int, sh
 
 if __name__ == "__main__":
 
-    # Load training video URLs from file (one URL per line)
+    # Load training video URLs from file
     with open('Data/urls/train_urls.txt', 'r') as f:
         train_urls = [line.strip() for line in f.readlines()]
 
