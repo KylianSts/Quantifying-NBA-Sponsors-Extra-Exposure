@@ -1,5 +1,5 @@
 """
-YouTube Video Collector for NBA Games (Parallel & Professional Version)
+YouTube Video Collector for NBA Games
 
 This script automates the collection of YouTube highlight video URLs for a given
 list of NBA games. It operates in parallel to speed up the process and includes
@@ -9,6 +9,8 @@ Key features:
 - Generates search queries from a CSV of NBA games.
 - Uses yt-dlp to search YouTube in parallel with multiple workers.
 - Validates videos based on duration, channel blacklists, and date matching (game day or next day).
+- Fetches detailed video metadata (views, likes, comments, duration).
+- Includes team information (full names and abbreviations) in output.
 - Provides detailed debugging output for rejected videos.
 - Saves the results in a clean, machine-readable CSV format.
 """
@@ -28,7 +30,7 @@ from datetime import timedelta
 # ============================================================================
 
 # Input CSV file containing NBA game data (game_id, teams, dates, etc.)
-GAMES_CSV_INPUT = "Data/nba_games_2025_2026.csv"
+GAMES_CSV_INPUT = "Data/nba_games_2025-26.csv"
 
 # Output CSV file where valid video URLs will be saved
 URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls.csv"
@@ -60,8 +62,8 @@ def create_youtube_queries(df: pd.DataFrame) -> List[Dict]:
     Creates structured search strings optimized for finding NBA game highlights.
     
     Args:
-        df: DataFrame with game data, requires columns: 'game_id', 'home_team_name',
-            'visitor_team_name', 'game_date', 'home_team_abbreviation', 'visitor_team_abbreviation'
+        df: DataFrame with game data, requires columns: 'GAME_ID', 'HOME_TEAM_NAME',
+            'AWAY_TEAM_NAME', 'GAME_DATE', 'HOME_TEAM_ABBREVIATION', 'AWAY_TEAM_ABBREVIATION'
     
     Returns:
         List of dictionaries, where each dictionary contains:
@@ -69,40 +71,93 @@ def create_youtube_queries(df: pd.DataFrame) -> List[Dict]:
             - query: Formatted YouTube search string
             - game_date_dt: Game date as datetime object
             - home_team: Full name of home team
-            - visitor_team: Full name of visiting team
+            - away_team: Full name of away team
             - home_abbr: Home team abbreviation
-            - visitor_abbr: Visitor team abbreviation
+            - away_abbr: Away team abbreviation
     """
     queries = []
     
     # Iterate through each game in the DataFrame
     for _, row in df.iterrows():
         # Skip rows with missing critical data
-        if pd.isna(row['game_id']) or pd.isna(row['home_team_name']):
+        if pd.isna(row['GAME_ID']) or pd.isna(row['HOME_TEAM_NAME']):
             continue
         
         # Convert game date string to datetime object for date validation
-        game_date = pd.to_datetime(row['game_date'])
+        game_date = pd.to_datetime(row['GAME_DATE'])
         
         # Create a dictionary with all game metadata needed for searching and validation
         query_dict = {
-            'game_id': int(row['game_id']),
+            'game_id': row['GAME_ID'],
             'query': row['youtube_search_name'],
             'game_date_dt': game_date,
-            'home_team': row['home_team_name'],
-            'visitor_team': row['visitor_team_name'],
-            'home_abbr': row['home_team_abbreviation'],
-            'visitor_abbr': row['visitor_team_abbreviation']
+            'home_team': row['HOME_TEAM_NAME'],
+            'away_team': row['AWAY_TEAM_NAME'],
+            'home_abbr': row['HOME_TEAM_ABBREVIATION'],
+            'away_abbr': row['AWAY_TEAM_ABBREVIATION']
         }
         queries.append(query_dict)
     
     return queries
 
 
+def fetch_video_metadata(video_id: str) -> Dict:
+    """
+    Fetch detailed metadata for a single video using yt-dlp.
+    Retrieves views, likes, comments, duration, and channel information.
+    
+    Args:
+        video_id: YouTube video ID (e.g., 'dQw4w9WgXcQ')
+    
+    Returns:
+        Dictionary containing video metadata:
+            - view_count: Number of views
+            - like_count: Number of likes
+            - comment_count: Number of comments
+            - duration: Video duration in seconds
+            - channel: Channel name
+    """
+    try:
+        # Configure yt-dlp to extract full metadata (not flat)
+        ydl_opts = {
+            'quiet': True,  # Suppress console output
+            'no_warnings': True,  # Hide warning messages
+            'extract_flat': False,  # Extract full metadata for views/likes/comments
+        }
+        
+        # Construct video URL
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Extract video metadata
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            
+            if info:
+                return {
+                    'view_count': info.get('view_count', 0),
+                    'like_count': info.get('like_count', 0),
+                    'comment_count': info.get('comment_count', 0),
+                    'duration': info.get('duration', 0),
+                    'channel': info.get('channel', '')
+                }
+    
+    except Exception as e:
+        print(f"[WARNING] Failed to fetch metadata for {video_id}: {e}")
+    
+    # Return default values if extraction fails
+    return {
+        'view_count': 0,
+        'like_count': 0,
+        'comment_count': 0,
+        'duration': 0,
+        'channel': ''
+    }
+
+
 def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
     """
     Perform a YouTube search using yt-dlp and return video metadata without downloading.
-    Uses flat extraction for faster results and reduced bandwidth.
+    Uses flat extraction for faster initial search results.
     
     Args:
         query: The search string for YouTube (formatted with team names and date)
@@ -121,7 +176,7 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
         ydl_opts = {
             'quiet': True,  # Suppress console output
             'no_warnings': True,  # Hide warning messages
-            'extract_flat': True,  # Get metadata only, don't download
+            'extract_flat': True,  # Get metadata only, don't download (fast)
             'playlistend': max_results  # Limit number of results
         }
         
@@ -213,7 +268,7 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
 def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
     """
     Worker function to process a single game query (designed for parallel execution).
-    Searches YouTube for game highlights and validates each result.
+    Searches YouTube for game highlights, validates each result, and fetches detailed metadata.
     
     Args:
         game_info: Dictionary containing all info for one game (query, date, teams, etc.)
@@ -221,7 +276,7 @@ def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
     Returns:
         Tuple containing three elements:
             - game_info: Original game information dictionary
-            - valid_videos: List of videos that passed all validation checks
+            - valid_videos: List of videos that passed all validation checks (with full metadata)
             - rejected_videos: List of videos that failed validation (with rejection reasons)
     """
     # Search YouTube for videos matching this game
@@ -236,8 +291,20 @@ def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
         validation_result = is_valid_video(video, game_info)
         
         if validation_result is True:
-            # Video passed validation, add to valid list
+            # Video passed validation, fetch detailed metadata (views, likes, comments)
+            metadata = fetch_video_metadata(video['video_id'])
+            
+            # Merge video info with detailed metadata
+            video.update(metadata)
+            
+            # Add team information from game_info
+            video['home_team_name'] = game_info['home_team']
+            video['away_team_name'] = game_info['away_team']
+            video['home_team_abbreviation'] = game_info['home_abbr']
+            video['away_team_abbreviation'] = game_info['away_abbr']
+            
             valid_videos.append(video)
+            
         elif DEBUG_REJECTIONS:
             # Video failed validation, record the reason for debugging
             video['reason'] = validation_result
@@ -258,7 +325,11 @@ def run_parallel_collection(queries: List[Dict]) -> List[Dict]:
         queries: List of game query dictionaries to process (from create_youtube_queries)
     
     Returns:
-        List of dictionaries, each containing a valid video's data with its associated game_id
+        List of dictionaries, each containing a valid video's data with:
+            - game_id: Associated NBA game identifier
+            - Video metadata (title, url, channel, duration, video_id)
+            - Engagement metrics (view_count, like_count, comment_count)
+            - Team information (names and abbreviations)
     """
     all_valid_videos = []
     
@@ -311,22 +382,25 @@ def main():
     Returns:
         None
     """
-    print("Starting the YouTube Highlight Collector script.")
+    print("="*60)
+    print("YOUTUBE NBA HIGHLIGHT COLLECTOR")
+    print("="*60)
     
     # Load game data from CSV file
     try:
         df = pd.read_csv(GAMES_CSV_INPUT)
+        print(f"Loaded {len(df)} games from '{GAMES_CSV_INPUT}'")
     except FileNotFoundError:
         print(f"ERROR: Input file not found at '{GAMES_CSV_INPUT}'. Aborting.")
         return
 
     # Convert game dates to datetime format for date validation
-    df['game_date'] = pd.to_datetime(df['game_date'])
-    df['game_date_str'] = df['game_date'].dt.strftime('%b %d %Y')  # Format: "Jan 15 2025"
+    df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
+    df['game_date_str'] = df['GAME_DATE'].dt.strftime('%b %d %Y')  # Format: "Jan 15 2025"
     
     # Create formatted YouTube search queries for each game
     df['youtube_search_name'] = (
-        df['home_team_name'] + ' vs ' + df['visitor_team_name'] + 
+        df['HOME_TEAM_NAME'] + ' vs ' + df['AWAY_TEAM_NAME'] + 
         ' Full game highlights | ' + df['game_date_str'] + ' NBA Season'
     )
     
@@ -334,7 +408,7 @@ def main():
     queries = create_youtube_queries(df)
     
     # Execute parallel collection across all games
-    print(f"Starting parallel collection with {MAX_WORKERS} workers for {len(queries)} games...")
+    print(f"\nStarting parallel collection with {MAX_WORKERS} workers for {len(queries)} games...")
     collected_videos = run_parallel_collection(queries)
     
     # Save collected videos to output CSV file
@@ -348,12 +422,40 @@ def main():
         results_df = pd.DataFrame(collected_videos)
         
         # Reorder columns for better readability
-        results_df = results_df[['game_id', 'title', 'url', 'channel', 'duration', 'video_id']]
+        # Video info -> Engagement metrics -> Team info -> Game ID
+        column_order = [
+            'game_id',
+            'title',
+            'url',
+            'video_id',
+            'channel',
+            'duration',
+            'view_count',
+            'like_count',
+            'comment_count',
+            'home_team_name',
+            'home_team_abbreviation',
+            'away_team_name',
+            'away_team_abbreviation'
+        ]
+        
+        # Only include columns that exist (in case some are missing)
+        existing_columns = [col for col in column_order if col in results_df.columns]
+        results_df = results_df[existing_columns]
         
         # Save to CSV with UTF-8 encoding to handle special characters
         results_df.to_csv(URLS_CSV_OUTPUT, index=False, encoding='utf-8')
         
-        print(f"\nSuccessfully saved {len(results_df)} video URLs to '{URLS_CSV_OUTPUT}'")
+        # Display summary
+        print("\n" + "="*60)
+        print("COLLECTION COMPLETE")
+        print("="*60)
+        print(f"Total videos collected: {len(results_df)}")
+        print(f"Output file: {URLS_CSV_OUTPUT}")
+        print(f"\nColumns in output:")
+        for col in existing_columns:
+            print(f"  - {col}")
+        print("="*60)
     else:
         print("\nNo valid videos were found. Output file was not created.")
 
