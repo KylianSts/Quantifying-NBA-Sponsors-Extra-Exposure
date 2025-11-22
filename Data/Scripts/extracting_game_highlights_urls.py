@@ -39,7 +39,7 @@ URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls.csv"
 MAX_RESULTS_PER_QUERY = 10
 
 # Delay between searches per thread to avoid YouTube rate-limiting (in seconds)
-SEARCH_DELAY = 0.1
+SEARCH_DELAY = 0.3
 
 # Number of parallel threads for simultaneous video searching
 MAX_WORKERS = 32
@@ -49,7 +49,10 @@ DEBUG_REJECTIONS = True
 
 # Blacklist official channel names to exclude from results
 CHANNEL_BLACKLIST = [
+    "NBA on ESPN",
+    "Sports On Prime",
     "Prime Video Sport France",
+    "Amazon Prime Video Türkiye",
     "NBA Europe",
     "NBA G League",
     "NBA Extra - beIN SPORTS France",
@@ -246,12 +249,68 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
         raise e
 
 
-def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def _team_matches(text: str, team_abbr: str, team_full_name: str) -> bool:
     """
-    Validate a single video against multiple criteria to ensure it's a legitimate game highlight.
-    Checks include channel blacklist, duration limits, and date matching.
+    Check if the text contains any reference to the team.
+    Matches abbreviation, full name, city name, or team nickname.
     
-    Supported date formats in video titles:
+    Extracts city and nickname from the full team name automatically.
+    Example: "Golden State Warriors" -> checks for "golden state", "warriors", "gsw"
+    
+    Args:
+        text: Lowercase text to search (title + description)
+        team_abbr: Team abbreviation (e.g., 'GSW', 'LAL')
+        team_full_name: Full team name (e.g., 'Golden State Warriors')
+    
+    Returns:
+        True if any team identifier is found in text, False otherwise
+    """
+    # Check full team name (e.g., "golden state warriors")
+    if team_full_name.lower() in text:
+        return True
+    
+    # Check abbreviation (e.g., "gsw") - use word boundary to avoid false matches
+    if re.search(rf'\b{team_abbr.lower()}\b', text):
+        return True
+    
+    # Extract city and nickname from full team name
+    # Example: "Golden State Warriors" -> ["Golden", "State", "Warriors"]
+    # Example: "Portland Trail Blazers" -> ["Portland", "Trail", "Blazers"]
+    name_parts = team_full_name.lower().split()
+    
+    if len(name_parts) >= 2:
+        # Get the team nickname (last word or last two words for multi-word nicknames)
+        # "Warriors", "Lakers", "Heat", "Trail Blazers", "Timberwolves"
+        nickname = name_parts[-1]  # Last word: "warriors", "blazers"
+        
+        # Check nickname with word boundaries
+        if re.search(rf'\b{re.escape(nickname)}\b', text):
+            return True
+        
+        # Check city name (everything except the last word)
+        # "golden state", "portland", "los angeles"
+        city = ' '.join(name_parts[:-1])
+        if re.search(rf'\b{re.escape(city)}\b', text):
+            return True
+        
+        # For multi-word nicknames like "Trail Blazers", check last two words together
+        if len(name_parts) >= 3:
+            nickname_two_words = ' '.join(name_parts[-2:])  # "trail blazers"
+            if re.search(rf'\b{re.escape(nickname_two_words)}\b', text):
+                return True
+    
+    return False
+
+
+def _date_matches(text: str, target_date) -> bool:
+    """
+    Check if the text contains the target date in any common format.
+    
+    Supported formats:
     - "November 2, 2025" or "Nov 2, 2025" (month day, year)
     - "November 2 2025" or "Nov 2 2025" (month day year without comma)
     - "2 November 2025" or "2 Nov 2025" (day month year)
@@ -260,44 +319,7 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     - "2/11/25" or "2/11/2025" (DD/MM/YY - European format)
     - "Nov 02" or "November 02" (month day without year)
     - "11.2.25" or "11.2.2025" (with dots)
-    
-    Args:
-        video: Dictionary of video metadata (title, channel, duration, url, etc.)
-        game_info: Dictionary of the target game's metadata (teams, date, etc.)
-    
-    Returns:
-        True if the video passes all validation checks
-        String describing the rejection reason if the video fails any check
-    """
-    # Check if video is from a blacklisted channel
-    channel_name = (video.get('channel') or '').strip()
-    if channel_name in CHANNEL_BLACKLIST:
-        return f"Rejected (Blacklisted Channel: {channel_name})"
-
-    # Validate video duration (too short = clips/teasers, too long = full games)
-    duration = video.get('duration', 0)
-    if duration < 60:  # Less than 1 minute is likely a teaser or ad
-        return f"Rejected (Too Short: {int(duration)}s)"
-    if duration > 900:  # More than 15 minutes is likely not highlights
-        return f"Rejected (Too Long: {int(duration)}s)"
-    
-    # Combine title and description for comprehensive text analysis
-    text = (video.get('title', '') + ' ' + (video.get('description') or '')).lower()
-    
-    # Get game date and next day (highlights often uploaded day after)
-    game_date = game_info['game_date_dt']
-    
-    # Check both game day
-    if _date_matches(text, game_date):
-        return True  # Video passed all validation checks
-    
-    # Reject video if no date pattern matches
-    return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')} or {next_day_date.strftime('%b %d')})"
-
-
-def _date_matches(text: str, target_date) -> bool:
-    """
-    Check if the text contains the target date in any common format.
+    - "2025-11-02" (ISO format)
     
     Args:
         text: Lowercase text to search (title + description)
@@ -314,54 +336,57 @@ def _date_matches(text: str, target_date) -> bool:
     year_full = target_date.year  # 2025
     year_short = target_date.year % 100  # 25
     
-    # Day with optional leading zero: matches both "2" and "02"
-    day_pattern = rf'0?{day}'
+    # Day patterns: matches "2", "02", "27", etc.
+    day_str = str(day)
+    day_padded = f'{day:02d}'  # "02", "27"
     
-    # Month number with optional leading zero: matches both "11" and "11"
-    month_num_pattern = rf'0?{month_num}'
+    # Month patterns
+    month_str = str(month_num)
+    month_padded = f'{month_num:02d}'  # "01", "10", "11"
     
-    # Year pattern: matches "2025", "25", or no year at all
-    year_pattern = rf'({year_full}|{year_short})?'
+    # Year patterns
+    year_short_str = str(year_short)
+    year_full_str = str(year_full)
     
     # Build comprehensive date patterns
     date_patterns = [
         # ===== Text-based month formats =====
         
-        # "November 2, 2025" or "Nov 2, 2025" (with comma)
-        rf'({month_full}|{month_abbr})\.?\s+{day_pattern}\s*,?\s*{year_pattern}',
+        # "November 2, 2025" or "Nov 2, 2025" or "Nov 2 2025" (with optional comma)
+        rf'({month_full}|{month_abbr})\.?\s*({day_str}|{day_padded})\s*,?\s*({year_full_str}|{year_short_str})?',
         
         # "2 November 2025" or "2 Nov 2025" (day first)
-        rf'{day_pattern}\s+({month_full}|{month_abbr})\.?\s*,?\s*{year_pattern}',
+        rf'({day_str}|{day_padded})\s+({month_full}|{month_abbr})\.?\s*,?\s*({year_full_str}|{year_short_str})?',
         
         # "2nd November" or "2nd of November" (ordinal)
-        rf'{day}(st|nd|rd|th)?\s+(of\s+)?({month_full}|{month_abbr})',
+        rf'{day_str}(st|nd|rd|th)?\s+(of\s+)?({month_full}|{month_abbr})',
         
         # ===== Numeric formats (US: MM/DD/YY) =====
         
-        # "11/2/25" or "11/2/2025" or "11/02/25" (slash separator)
-        rf'{month_num_pattern}/{day_pattern}/({year_full}|{year_short})',
+        # "10/27/25" or "10/27/2025" (slash separator)
+        rf'({month_str}|{month_padded})/({day_str}|{day_padded})/({year_full_str}|{year_short_str})',
         
-        # "11/2" without year
-        rf'{month_num_pattern}/{day_pattern}(?![/\d])',
+        # "10/27" without year (but not followed by more digits)
+        rf'({month_str}|{month_padded})/({day_str}|{day_padded})(?!/|\d)',
         
-        # "11-2-25" or "11-2-2025" (dash separator)
-        rf'{month_num_pattern}-{day_pattern}-({year_full}|{year_short})',
+        # "10-27-25" or "10-27-2025" (dash separator)
+        rf'({month_str}|{month_padded})-({day_str}|{day_padded})-({year_full_str}|{year_short_str})',
         
-        # "11.2.25" or "11.2.2025" (dot separator)
-        rf'{month_num_pattern}\.{day_pattern}\.({year_full}|{year_short})',
+        # "10.27.25" or "10.27.2025" (dot separator)
+        rf'({month_str}|{month_padded})\.({day_str}|{day_padded})\.({year_full_str}|{year_short_str})',
         
         # ===== Numeric formats (European: DD/MM/YY) =====
         
-        # "2/11/25" or "02/11/2025" (day/month/year)
-        rf'{day_pattern}/{month_num_pattern}/({year_full}|{year_short})',
+        # "27/10/25" or "27/10/2025" (day/month/year)
+        rf'({day_str}|{day_padded})/({month_str}|{month_padded})/({year_full_str}|{year_short_str})',
         
-        # "2-11-25" or "02-11-2025" (day-month-year)
-        rf'{day_pattern}-{month_num_pattern}-({year_full}|{year_short})',
+        # "27-10-25" or "27-10-2025" (day-month-year)
+        rf'({day_str}|{day_padded})-({month_str}|{month_padded})-({year_full_str}|{year_short_str})',
         
         # ===== ISO format =====
         
-        # "2025-11-02" (ISO format YYYY-MM-DD)
-        rf'{year_full}-{month_num_pattern}-{day_pattern}',
+        # "2025-10-27" (ISO format YYYY-MM-DD)
+        rf'{year_full_str}-({month_str}|{month_padded})-({day_str}|{day_padded})',
     ]
     
     # Check if any pattern matches
@@ -370,6 +395,83 @@ def _date_matches(text: str, target_date) -> bool:
             return True
     
     return False
+
+
+# ============================================================================
+# MAIN VALIDATION FUNCTION
+# ============================================================================
+
+def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
+    """
+    Validate a single video against multiple criteria to ensure it's a legitimate game highlight.
+    
+    Validation checks (in order):
+    1. Channel blacklist - Reject videos from known spam/low-quality channels
+    2. Duration limits - Reject too short (<60s) or too long (>900s) videos
+    3. Date matching - Ensure video title/description contains the game date
+    4. Team matching - Ensure at least one team is mentioned in the title
+    
+    Args:
+        video: Dictionary of video metadata (title, channel, duration, url, etc.)
+        game_info: Dictionary of the target game's metadata containing:
+            - game_id: Unique game identifier
+            - query: YouTube search query used
+            - game_date_dt: Game date as datetime
+            - home_team: Full name of home team (e.g., 'Golden State Warriors')
+            - away_team: Full name of away team (e.g., 'Portland Trail Blazers')
+            - home_abbr: Home team abbreviation (e.g., 'GSW')
+            - away_abbr: Away team abbreviation (e.g., 'POR')
+    
+    Returns:
+        True if the video passes all validation checks
+        String describing the rejection reason if the video fails any check
+    """
+    # ========================================================================
+    # Check 1: Channel Blacklist
+    # ========================================================================
+    channel_name = (video.get('channel') or '').strip()
+    if channel_name in CHANNEL_BLACKLIST:
+        return f"Rejected (Blacklisted Channel: {channel_name})"
+
+    # ========================================================================
+    # Check 2: Video Duration (too short = clips/teasers, too long = full games)
+    # ========================================================================
+    duration = video.get('duration', 0)
+    if duration < 60:  # Less than 1 minute is likely a teaser or ad
+        return f"Rejected (Too Short: {int(duration)}s)"
+    if duration > 900:  # More than 15 minutes is likely not highlights
+        return f"Rejected (Too Long: {int(duration)}s)"
+    
+    # ========================================================================
+    # Prepare text for analysis
+    # ========================================================================
+    # Combine title and description for comprehensive text analysis
+    text = (video.get('title', '') + ' ' + (video.get('description') or '')).lower()
+    
+    # ========================================================================
+    # Check 3: Date Matching
+    # ========================================================================
+    game_date = game_info['game_date_dt']
+    
+    if not _date_matches(text, game_date):
+        return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')})"
+    
+    # ========================================================================
+    # Check 4: Team Matching (at least one team must be mentioned)
+    # ========================================================================
+    # This ensures the video is actually about this specific game
+    # Since we already checked the date, finding one team is enough
+    # (a team can't play twice on the same day)
+    home_team_found = _team_matches(text, game_info['home_abbr'], game_info['home_team'])
+    away_team_found = _team_matches(text, game_info['away_abbr'], game_info['away_team'])
+    
+    if not home_team_found and not away_team_found:
+        return f"Rejected (Team Mismatch: Expected {game_info['home_abbr']} or {game_info['away_abbr']})"
+    
+    # ========================================================================
+    # All checks passed
+    # ========================================================================
+    return True
 
 
 def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
@@ -495,7 +597,7 @@ def main():
     
     # Load game data from CSV file
     try:
-        df = pd.read_csv(GAMES_CSV_INPUT)
+        df = pd.read_csv(GAMES_CSV_INPUT).head()
         print(f"Loaded {len(df)} games from '{GAMES_CSV_INPUT}'")
     except FileNotFoundError:
         print(f"ERROR: Input file not found at '{GAMES_CSV_INPUT}'. Aborting.")
@@ -529,7 +631,7 @@ def main():
         results_df = pd.DataFrame(collected_videos)
         
         # Reorder columns for better readability
-        # Video info -> Engagement metrics -> Team info -> Game ID
+        # Video info -> Engagement metrics -> Game ID
         column_order = [
             'game_id',
             'title',
@@ -540,10 +642,10 @@ def main():
             'view_count',
             'like_count',
             'comment_count',
-            'home_team_name',
-            'home_team_abbreviation',
-            'away_team_name',
-            'away_team_abbreviation'
+            #'home_team_name',
+            #'home_team_abbreviation',
+            #'away_team_name',
+            #'away_team_abbreviation'
         ]
         
         # Only include columns that exist (in case some are missing)
