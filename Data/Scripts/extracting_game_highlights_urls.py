@@ -251,6 +251,16 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     Validate a single video against multiple criteria to ensure it's a legitimate game highlight.
     Checks include channel blacklist, duration limits, and date matching.
     
+    Supported date formats in video titles:
+    - "November 2, 2025" or "Nov 2, 2025" (month day, year)
+    - "November 2 2025" or "Nov 2 2025" (month day year without comma)
+    - "2 November 2025" or "2 Nov 2025" (day month year)
+    - "11/2/25" or "11/2/2025" (MM/DD/YY or MM/DD/YYYY)
+    - "11-2-25" or "11-2-2025" (MM-DD-YY or MM-DD-YYYY)
+    - "2/11/25" or "2/11/2025" (DD/MM/YY - European format)
+    - "Nov 02" or "November 02" (month day without year)
+    - "11.2.25" or "11.2.2025" (with dots)
+    
     Args:
         video: Dictionary of video metadata (title, channel, duration, url, etc.)
         game_info: Dictionary of the target game's metadata (teams, date, etc.)
@@ -259,8 +269,8 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
         True if the video passes all validation checks
         String describing the rejection reason if the video fails any check
     """
-    # Check if video is from a blacklisted channel (known spam or low-quality sources)
-    channel_name = (video.get('channel') or '').lower()
+    # Check if video is from a blacklisted channel
+    channel_name = (video.get('channel') or '').strip()
     if channel_name in CHANNEL_BLACKLIST:
         return f"Rejected (Blacklisted Channel: {channel_name})"
 
@@ -274,27 +284,92 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     # Combine title and description for comprehensive text analysis
     text = (video.get('title', '') + ' ' + (video.get('description') or '')).lower()
     
-    # Check if video mentions the game date (game day or next day upload)
+    # Get game date and next day (highlights often uploaded day after)
     game_date = game_info['game_date_dt']
     
-    # Build regex patterns for both full month names and abbreviations
-    date_patterns = []
-    month_full = game_date.strftime('%B').lower()  # e.g., "January"
-    month_abbr = game_date.strftime('%b').lower()  # e.g., "Jan"
-    day = str(game_date.day)  # e.g., "15"
-        
-    # Create patterns for "Month Day" and "Day Month" formats
-    date_patterns.extend([
-        rf'({month_full}|{month_abbr})\s+{day}',  # "January 15" or "Jan 15"
-        rf'{day}\s+({month_full}|{month_abbr})'   # "15 January" or "15 Jan"
-    ])
+    # Check both game day
+    if _date_matches(text, game_date):
+        return True  # Video passed all validation checks
     
     # Reject video if no date pattern matches
-    if not any(re.search(pattern, text) for pattern in date_patterns):
-        return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')})"
+    return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')} or {next_day_date.strftime('%b %d')})"
+
+
+def _date_matches(text: str, target_date) -> bool:
+    """
+    Check if the text contains the target date in any common format.
     
-    # Video passed all validation checks
-    return True
+    Args:
+        text: Lowercase text to search (title + description)
+        target_date: Datetime object to match against
+    
+    Returns:
+        True if date is found in text, False otherwise
+    """
+    # Extract date components
+    month_full = target_date.strftime('%B').lower()  # "november"
+    month_abbr = target_date.strftime('%b').lower()  # "nov"
+    month_num = target_date.month  # 11
+    day = target_date.day  # 2
+    year_full = target_date.year  # 2025
+    year_short = target_date.year % 100  # 25
+    
+    # Day with optional leading zero: matches both "2" and "02"
+    day_pattern = rf'0?{day}'
+    
+    # Month number with optional leading zero: matches both "11" and "11"
+    month_num_pattern = rf'0?{month_num}'
+    
+    # Year pattern: matches "2025", "25", or no year at all
+    year_pattern = rf'({year_full}|{year_short})?'
+    
+    # Build comprehensive date patterns
+    date_patterns = [
+        # ===== Text-based month formats =====
+        
+        # "November 2, 2025" or "Nov 2, 2025" (with comma)
+        rf'({month_full}|{month_abbr})\.?\s+{day_pattern}\s*,?\s*{year_pattern}',
+        
+        # "2 November 2025" or "2 Nov 2025" (day first)
+        rf'{day_pattern}\s+({month_full}|{month_abbr})\.?\s*,?\s*{year_pattern}',
+        
+        # "2nd November" or "2nd of November" (ordinal)
+        rf'{day}(st|nd|rd|th)?\s+(of\s+)?({month_full}|{month_abbr})',
+        
+        # ===== Numeric formats (US: MM/DD/YY) =====
+        
+        # "11/2/25" or "11/2/2025" or "11/02/25" (slash separator)
+        rf'{month_num_pattern}/{day_pattern}/({year_full}|{year_short})',
+        
+        # "11/2" without year
+        rf'{month_num_pattern}/{day_pattern}(?![/\d])',
+        
+        # "11-2-25" or "11-2-2025" (dash separator)
+        rf'{month_num_pattern}-{day_pattern}-({year_full}|{year_short})',
+        
+        # "11.2.25" or "11.2.2025" (dot separator)
+        rf'{month_num_pattern}\.{day_pattern}\.({year_full}|{year_short})',
+        
+        # ===== Numeric formats (European: DD/MM/YY) =====
+        
+        # "2/11/25" or "02/11/2025" (day/month/year)
+        rf'{day_pattern}/{month_num_pattern}/({year_full}|{year_short})',
+        
+        # "2-11-25" or "02-11-2025" (day-month-year)
+        rf'{day_pattern}-{month_num_pattern}-({year_full}|{year_short})',
+        
+        # ===== ISO format =====
+        
+        # "2025-11-02" (ISO format YYYY-MM-DD)
+        rf'{year_full}-{month_num_pattern}-{day_pattern}',
+    ]
+    
+    # Check if any pattern matches
+    for pattern in date_patterns:
+        if re.search(pattern, text):
+            return True
+    
+    return False
 
 
 def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
