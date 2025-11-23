@@ -30,7 +30,7 @@ from datetime import timedelta
 # ============================================================================
 
 # Input CSV file containing NBA game data (game_id, teams, dates, etc.)
-GAMES_CSV_INPUT = "Data/nba_games_2025-26.csv"
+GAMES_CSV_INPUT = "Data/exposure_and_game_info/nba_games_2025-26.csv"
 
 # Output CSV file where valid video URLs will be saved
 URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls.csv"
@@ -206,6 +206,7 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
             - title: Video title
             - channel: Channel name that uploaded the video
             - duration: Video duration in seconds
+            - view_count: Number of views (if available)
             - url: Full YouTube watch URL
     """
     try:
@@ -234,11 +235,14 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
                 # Only process valid entries with video IDs
                 if entry and entry.get('id'):
                     duration = entry.get('duration')
+                    view_count = entry.get('view_count')  # Extract view count from search results
+                    
                     videos.append({
                         'video_id': entry['id'],
                         'title': entry.get('title', ''),
                         'channel': entry.get('channel', ''),
                         'duration': duration if duration else 0,  # Default to 0 if duration missing
+                        'view_count': view_count if view_count else 0,  # Default to 0 if view count missing
                         'url': f"https://www.youtube.com/watch?v={entry['id']}"
                     })
             
@@ -408,8 +412,9 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     Validation checks (in order):
     1. Channel blacklist - Reject videos from known spam/low-quality channels
     2. Duration limits - Reject too short (<60s) or too long (>900s) videos
-    3. Date matching - Ensure video title/description contains the game date
-    4. Team matching - Ensure at least one team is mentioned in the title
+    3. Minimum view count - Reject videos with fewer than 1000 views
+    4. Date matching - Ensure video title/description contains the game date
+    5. Team matching - Ensure at least one team is mentioned in the title
     
     Args:
         video: Dictionary of video metadata (title, channel, duration, url, etc.)
@@ -443,13 +448,20 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
         return f"Rejected (Too Long: {int(duration)}s)"
     
     # ========================================================================
+    # Check 3: Minimum View Count (ensures video has sufficient reach/quality)
+    # ========================================================================
+    view_count = video.get('view_count', 0)
+    if view_count < 1000:  # Videos with fewer than 1000 views (not impactfull)
+        return f"Rejected (Insufficient Views: {view_count} views)"
+    
+    # ========================================================================
     # Prepare text for analysis
     # ========================================================================
     # Combine title and description for comprehensive text analysis
     text = (video.get('title', '') + ' ' + (video.get('description') or '')).lower()
     
     # ========================================================================
-    # Check 3: Date Matching
+    # Check 4: Date Matching
     # ========================================================================
     game_date = game_info['game_date_dt']
     
@@ -457,7 +469,7 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
         return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')})"
     
     # ========================================================================
-    # Check 4: Team Matching (at least one team must be mentioned)
+    # Check 5: Team Matching (at least one team must be mentioned)
     # ========================================================================
     # This ensures the video is actually about this specific game
     # Since we already checked the date, finding one team is enough
@@ -597,7 +609,7 @@ def main():
     
     # Load game data from CSV file
     try:
-        df = pd.read_csv(GAMES_CSV_INPUT).head()
+        df = pd.read_csv(GAMES_CSV_INPUT)
         print(f"Loaded {len(df)} games from '{GAMES_CSV_INPUT}'")
     except FileNotFoundError:
         print(f"ERROR: Input file not found at '{GAMES_CSV_INPUT}'. Aborting.")
