@@ -1,12 +1,19 @@
 # Environments 
 nba_sponsor.venv
-test.venv
+label_studio.venv
 
 # Heavy data
 Data/images
 Data/yolo_dataset
 Data/demonstration_video.mp4
+Data/temp_videos
 
 # Yolo models
 Models/yolo
+Models\models_results\modelisation_v3\yolov8l-obb_fine_tuned_v3\weights
+Models\models_results\modelisation_v4\yolov8l-obb_fine_tuned_v4\weights
 Models\models_results\modelisation_v5\yolov8x-obb_fine_tuned_v5\weights
+Models\models_results\modelisation_v6\yolov8l-obb_fine_tuned_v6\weights
+
+# Other 
+to_do.md
