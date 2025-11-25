@@ -34,8 +34,8 @@ TARGET_SEASON = "2025-26"
 SEASON_TYPE = "Regular Season"
 
 # Output file paths for collected data
-GAMES_OUTPUT_FILE = f"Data/nba_games_{TARGET_SEASON}.csv"
-PLAYERS_OUTPUT_FILE = f"Data/nba_players_stats_{TARGET_SEASON}.csv"
+GAMES_OUTPUT_FILE = f"Data/exposure_and_game_info/nba_games_{TARGET_SEASON}.csv"
+PLAYERS_OUTPUT_FILE = f"Data/exposure_and_game_info/nba_players_stats_{TARGET_SEASON}.csv"
 
 # API rate limiting configuration
 API_DELAY = 0.2  # Delay between API calls in seconds (to avoid rate limiting)
