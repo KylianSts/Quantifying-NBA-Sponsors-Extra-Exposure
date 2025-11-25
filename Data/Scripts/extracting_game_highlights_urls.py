@@ -1,9 +1,12 @@
 """
-YouTube Video Collector for NBA Games
+YouTube Video Collector for NBA Games (RESUMABLE VERSION)
 
 This script automates the collection of YouTube highlight video URLs for a given
 list of NBA games. It operates in parallel to speed up the process and includes
 robust validation checks to ensure the relevance of collected videos.
+
+NEW: Resumability - automatically skips games that already have videos in the output CSV.
+This allows you to safely run the script multiple times without re-processing games.
 
 Key features:
 - Generates search queries from a CSV of NBA games.
@@ -12,7 +15,7 @@ Key features:
 - Fetches detailed video metadata (views, likes, comments, duration).
 - Includes team information (full names and abbreviations) in output.
 - Provides detailed debugging output for rejected videos.
-- Saves the results in a clean, machine-readable CSV format.
+- Saves results incrementally and resumes from where it left off.
 """
 
 import pandas as pd
@@ -46,6 +49,9 @@ MAX_WORKERS = 32
 
 # Enable detailed logging of rejected videos with reasons
 DEBUG_REJECTIONS = True 
+
+# Save frequency (number of games processed before saving)
+SAVE_EVERY = 3
 
 # Blacklist official channel names to exclude from results
 CHANNEL_BLACKLIST = [
@@ -88,6 +94,78 @@ CHANNEL_BLACKLIST = [
     "Utah Jazz",
     "Washington Wizards"
 ]
+
+# ============================================================================
+# RESUMABILITY FUNCTIONS
+# ============================================================================
+
+def load_existing_results(output_path: str) -> Tuple[pd.DataFrame, set]:
+    """
+    Load existing results CSV and return both the dataframe and a set of processed game_ids.
+    
+    Args:
+        output_path: Path to the output CSV file
+    
+    Returns:
+        Tuple containing:
+            - DataFrame of existing results (empty if file doesn't exist)
+            - Set of game_ids that have already been processed
+    """
+    if os.path.exists(output_path):
+        try:
+            df = pd.read_csv(output_path)
+            processed_game_ids = set(df['game_id'].unique())
+            print(f"Found existing results with {len(processed_game_ids)} already processed games.")
+            return df, processed_game_ids
+        except Exception as e:
+            print(f"Error loading existing results: {e}")
+            return pd.DataFrame(), set()
+    return pd.DataFrame(), set()
+
+
+def save_results_incremental(new_videos: List[Dict], output_path: str):
+    """
+    Append new video results to the CSV file (or create if doesn't exist).
+    
+    Args:
+        new_videos: List of video dictionaries to save
+        output_path: Path to the output CSV file
+    """
+    if not new_videos:
+        return
+    
+    new_df = pd.DataFrame(new_videos)
+    
+    # Reorder columns for better readability
+    column_order = [
+        'game_id',
+        'title',
+        'url',
+        'video_id',
+        'channel',
+        'duration',
+        'view_count',
+        'like_count',
+        'comment_count',
+    ]
+    
+    # Only include columns that exist
+    existing_columns = [col for col in column_order if col in new_df.columns]
+    new_df = new_df[existing_columns]
+    
+    try:
+        if os.path.exists(output_path):
+            # Append to existing file
+            new_df.to_csv(output_path, mode='a', header=False, index=False, encoding='utf-8')
+        else:
+            # Create new file with header
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            new_df.to_csv(output_path, index=False, encoding='utf-8')
+    except Exception as e:
+        print(f"\n[SAVE ERROR] Could not save results: {e}")
+
 
 # ============================================================================
 # CORE FUNCTIONS
@@ -157,9 +235,10 @@ def fetch_video_metadata(video_id: str) -> Dict:
     try:
         # Configure yt-dlp to extract full metadata (not flat)
         ydl_opts = {
-            'quiet': True,  # Suppress console output
-            'no_warnings': True,  # Hide warning messages
-            'extract_flat': False,  # Extract full metadata for views/likes/comments
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'cookiesfrombrowser': ('firefox',),
         }
         
         # Construct video URL
@@ -181,7 +260,6 @@ def fetch_video_metadata(video_id: str) -> Dict:
     except Exception as e:
         print(f"[WARNING] Failed to fetch metadata for {video_id}: {e}")
     
-    # Return default values if extraction fails
     return {
         'view_count': 0,
         'like_count': 0,
@@ -201,55 +279,42 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
         max_results: The maximum number of video results to fetch from search
     
     Returns:
-        List of dictionaries, each containing metadata for a found video:
-            - video_id: Unique YouTube video identifier
-            - title: Video title
-            - channel: Channel name that uploaded the video
-            - duration: Video duration in seconds
-            - view_count: Number of views (if available)
-            - url: Full YouTube watch URL
+        List of dictionaries, each containing metadata for a found video
     """
     try:
-        # Configure yt-dlp for search-only mode (no downloads)
         ydl_opts = {
-            'quiet': True,  # Suppress console output
-            'no_warnings': True,  # Hide warning messages
-            'extract_flat': True,  # Get metadata only, don't download (fast)
-            'playlistend': max_results  # Limit number of results
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'playlistend': max_results
         }
         
-        # Format search string for yt-dlp (ytsearch prefix tells yt-dlp to search YouTube)
         search_string = f"ytsearch{max_results}:{query}"
         
-        # Execute the YouTube search
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_string, download=False)
             
-            # Check if search returned any results
             if not result or 'entries' not in result:
                 return []
             
-            # Parse video metadata from search results
             videos = []
             for entry in result.get('entries', []):
-                # Only process valid entries with video IDs
                 if entry and entry.get('id'):
                     duration = entry.get('duration')
-                    view_count = entry.get('view_count')  # Extract view count from search results
+                    view_count = entry.get('view_count')
                     
                     videos.append({
                         'video_id': entry['id'],
                         'title': entry.get('title', ''),
                         'channel': entry.get('channel', ''),
-                        'duration': duration if duration else 0,  # Default to 0 if duration missing
-                        'view_count': view_count if view_count else 0,  # Default to 0 if view count missing
+                        'duration': duration if duration else 0,
+                        'view_count': view_count if view_count else 0,
                         'url': f"https://www.youtube.com/watch?v={entry['id']}"
                     })
             
             return videos
     
     except Exception as e:
-        # Re-raise exception to be handled by the caller
         raise e
 
 
@@ -258,52 +323,27 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
 # ============================================================================
 
 def _team_matches(text: str, team_abbr: str, team_full_name: str) -> bool:
-    """
-    Check if the text contains any reference to the team.
-    Matches abbreviation, full name, city name, or team nickname.
-    
-    Extracts city and nickname from the full team name automatically.
-    Example: "Golden State Warriors" -> checks for "golden state", "warriors", "gsw"
-    
-    Args:
-        text: Lowercase text to search (title + description)
-        team_abbr: Team abbreviation (e.g., 'GSW', 'LAL')
-        team_full_name: Full team name (e.g., 'Golden State Warriors')
-    
-    Returns:
-        True if any team identifier is found in text, False otherwise
-    """
-    # Check full team name (e.g., "golden state warriors")
+    """Check if the text contains any reference to the team."""
     if team_full_name.lower() in text:
         return True
     
-    # Check abbreviation (e.g., "gsw") - use word boundary to avoid false matches
     if re.search(rf'\b{team_abbr.lower()}\b', text):
         return True
     
-    # Extract city and nickname from full team name
-    # Example: "Golden State Warriors" -> ["Golden", "State", "Warriors"]
-    # Example: "Portland Trail Blazers" -> ["Portland", "Trail", "Blazers"]
     name_parts = team_full_name.lower().split()
     
     if len(name_parts) >= 2:
-        # Get the team nickname (last word or last two words for multi-word nicknames)
-        # "Warriors", "Lakers", "Heat", "Trail Blazers", "Timberwolves"
-        nickname = name_parts[-1]  # Last word: "warriors", "blazers"
+        nickname = name_parts[-1]
         
-        # Check nickname with word boundaries
         if re.search(rf'\b{re.escape(nickname)}\b', text):
             return True
         
-        # Check city name (everything except the last word)
-        # "golden state", "portland", "los angeles"
         city = ' '.join(name_parts[:-1])
         if re.search(rf'\b{re.escape(city)}\b', text):
             return True
         
-        # For multi-word nicknames like "Trail Blazers", check last two words together
         if len(name_parts) >= 3:
-            nickname_two_words = ' '.join(name_parts[-2:])  # "trail blazers"
+            nickname_two_words = ' '.join(name_parts[-2:])
             if re.search(rf'\b{re.escape(nickname_two_words)}\b', text):
                 return True
     
@@ -311,89 +351,36 @@ def _team_matches(text: str, team_abbr: str, team_full_name: str) -> bool:
 
 
 def _date_matches(text: str, target_date) -> bool:
-    """
-    Check if the text contains the target date in any common format.
+    """Check if the text contains the target date in any common format."""
+    month_full = target_date.strftime('%B').lower()
+    month_abbr = target_date.strftime('%b').lower()
+    month_num = target_date.month
+    day = target_date.day
+    year_full = target_date.year
+    year_short = target_date.year % 100
     
-    Supported formats:
-    - "November 2, 2025" or "Nov 2, 2025" (month day, year)
-    - "November 2 2025" or "Nov 2 2025" (month day year without comma)
-    - "2 November 2025" or "2 Nov 2025" (day month year)
-    - "11/2/25" or "11/2/2025" (MM/DD/YY or MM/DD/YYYY)
-    - "11-2-25" or "11-2-2025" (MM-DD-YY or MM-DD-YYYY)
-    - "2/11/25" or "2/11/2025" (DD/MM/YY - European format)
-    - "Nov 02" or "November 02" (month day without year)
-    - "11.2.25" or "11.2.2025" (with dots)
-    - "2025-11-02" (ISO format)
-    
-    Args:
-        text: Lowercase text to search (title + description)
-        target_date: Datetime object to match against
-    
-    Returns:
-        True if date is found in text, False otherwise
-    """
-    # Extract date components
-    month_full = target_date.strftime('%B').lower()  # "november"
-    month_abbr = target_date.strftime('%b').lower()  # "nov"
-    month_num = target_date.month  # 11
-    day = target_date.day  # 2
-    year_full = target_date.year  # 2025
-    year_short = target_date.year % 100  # 25
-    
-    # Day patterns: matches "2", "02", "27", etc.
     day_str = str(day)
-    day_padded = f'{day:02d}'  # "02", "27"
+    day_padded = f'{day:02d}'
     
-    # Month patterns
     month_str = str(month_num)
-    month_padded = f'{month_num:02d}'  # "01", "10", "11"
+    month_padded = f'{month_num:02d}'
     
-    # Year patterns
     year_short_str = str(year_short)
     year_full_str = str(year_full)
     
-    # Build comprehensive date patterns
     date_patterns = [
-        # ===== Text-based month formats =====
-        
-        # "November 2, 2025" or "Nov 2, 2025" or "Nov 2 2025" (with optional comma)
         rf'({month_full}|{month_abbr})\.?\s*({day_str}|{day_padded})\s*,?\s*({year_full_str}|{year_short_str})?',
-        
-        # "2 November 2025" or "2 Nov 2025" (day first)
         rf'({day_str}|{day_padded})\s+({month_full}|{month_abbr})\.?\s*,?\s*({year_full_str}|{year_short_str})?',
-        
-        # "2nd November" or "2nd of November" (ordinal)
         rf'{day_str}(st|nd|rd|th)?\s+(of\s+)?({month_full}|{month_abbr})',
-        
-        # ===== Numeric formats (US: MM/DD/YY) =====
-        
-        # "10/27/25" or "10/27/2025" (slash separator)
         rf'({month_str}|{month_padded})/({day_str}|{day_padded})/({year_full_str}|{year_short_str})',
-        
-        # "10/27" without year (but not followed by more digits)
         rf'({month_str}|{month_padded})/({day_str}|{day_padded})(?!/|\d)',
-        
-        # "10-27-25" or "10-27-2025" (dash separator)
         rf'({month_str}|{month_padded})-({day_str}|{day_padded})-({year_full_str}|{year_short_str})',
-        
-        # "10.27.25" or "10.27.2025" (dot separator)
         rf'({month_str}|{month_padded})\.({day_str}|{day_padded})\.({year_full_str}|{year_short_str})',
-        
-        # ===== Numeric formats (European: DD/MM/YY) =====
-        
-        # "27/10/25" or "27/10/2025" (day/month/year)
         rf'({day_str}|{day_padded})/({month_str}|{month_padded})/({year_full_str}|{year_short_str})',
-        
-        # "27-10-25" or "27-10-2025" (day-month-year)
         rf'({day_str}|{day_padded})-({month_str}|{month_padded})-({year_full_str}|{year_short_str})',
-        
-        # ===== ISO format =====
-        
-        # "2025-10-27" (ISO format YYYY-MM-DD)
         rf'{year_full_str}-({month_str}|{month_padded})-({day_str}|{day_padded})',
     ]
     
-    # Check if any pattern matches
     for pattern in date_patterns:
         if re.search(pattern, text):
             return True
@@ -408,117 +395,60 @@ def _date_matches(text: str, target_date) -> bool:
 def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     """
     Validate a single video against multiple criteria to ensure it's a legitimate game highlight.
-    
-    Validation checks (in order):
-    1. Channel blacklist - Reject videos from known spam/low-quality channels
-    2. Duration limits - Reject too short (<60s) or too long (>900s) videos
-    3. Minimum view count - Reject videos with fewer than 1000 views
-    4. Date matching - Ensure video title/description contains the game date
-    5. Team matching - Ensure at least one team is mentioned in the title
-    
-    Args:
-        video: Dictionary of video metadata (title, channel, duration, url, etc.)
-        game_info: Dictionary of the target game's metadata containing:
-            - game_id: Unique game identifier
-            - query: YouTube search query used
-            - game_date_dt: Game date as datetime
-            - home_team: Full name of home team (e.g., 'Golden State Warriors')
-            - away_team: Full name of away team (e.g., 'Portland Trail Blazers')
-            - home_abbr: Home team abbreviation (e.g., 'GSW')
-            - away_abbr: Away team abbreviation (e.g., 'POR')
-    
-    Returns:
-        True if the video passes all validation checks
-        String describing the rejection reason if the video fails any check
+    Returns True if valid, or a rejection reason string if invalid.
     """
-    # ========================================================================
     # Check 1: Channel Blacklist
-    # ========================================================================
     channel_name = (video.get('channel') or '').strip()
     if channel_name in CHANNEL_BLACKLIST:
         return f"Rejected (Blacklisted Channel: {channel_name})"
 
-    # ========================================================================
-    # Check 2: Video Duration (too short = clips/teasers, too long = full games)
-    # ========================================================================
+    # Check 2: Video Duration
     duration = video.get('duration', 0)
-    if duration < 60:  # Less than 1 minute is likely a teaser or ad
+    if duration < 60:
         return f"Rejected (Too Short: {int(duration)}s)"
-    if duration > 900:  # More than 15 minutes is likely not highlights
+    if duration > 900:
         return f"Rejected (Too Long: {int(duration)}s)"
     
-    # ========================================================================
-    # Check 3: Minimum View Count (ensures video has sufficient reach/quality)
-    # ========================================================================
+    # Check 3: Minimum View Count
     view_count = video.get('view_count', 0)
-    if view_count < 1000:  # Videos with fewer than 1000 views (not impactfull)
+    if view_count < 1000:
         return f"Rejected (Insufficient Views: {view_count} views)"
     
-    # ========================================================================
     # Prepare text for analysis
-    # ========================================================================
-    # Combine title and description for comprehensive text analysis
     text = (video.get('title', '') + ' ' + (video.get('description') or '')).lower()
     
-    # ========================================================================
     # Check 4: Date Matching
-    # ========================================================================
     game_date = game_info['game_date_dt']
     
     if not _date_matches(text, game_date):
         return f"Rejected (Date Mismatch: Expected {game_date.strftime('%b %d')})"
     
-    # ========================================================================
-    # Check 5: Team Matching (at least one team must be mentioned)
-    # ========================================================================
-    # This ensures the video is actually about this specific game
-    # Since we already checked the date, finding one team is enough
-    # (a team can't play twice on the same day)
+    # Check 5: Team Matching
     home_team_found = _team_matches(text, game_info['home_abbr'], game_info['home_team'])
     away_team_found = _team_matches(text, game_info['away_abbr'], game_info['away_team'])
     
     if not home_team_found and not away_team_found:
         return f"Rejected (Team Mismatch: Expected {game_info['home_abbr']} or {game_info['away_abbr']})"
     
-    # ========================================================================
-    # All checks passed
-    # ========================================================================
     return True
 
 
 def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
     """
     Worker function to process a single game query (designed for parallel execution).
-    Searches YouTube for game highlights, validates each result, and fetches detailed metadata.
-    
-    Args:
-        game_info: Dictionary containing all info for one game (query, date, teams, etc.)
-    
-    Returns:
-        Tuple containing three elements:
-            - game_info: Original game information dictionary
-            - valid_videos: List of videos that passed all validation checks (with full metadata)
-            - rejected_videos: List of videos that failed validation (with rejection reasons)
     """
-    # Search YouTube for videos matching this game
     videos = search_youtube_videos(game_info['query'], MAX_RESULTS_PER_QUERY)
     
-    # Initialize lists to categorize videos
     valid_videos = []
     rejected_videos = []
 
-    # Validate each video found in the search
     for video in videos:
         validation_result = is_valid_video(video, game_info)
         
         if validation_result is True:
-            # Video passed validation, fetch detailed metadata (views, likes, comments)
             metadata = fetch_video_metadata(video['video_id'])
-            
-            # Merge video info with detailed metadata
             video.update(metadata)
             
-            # Add team information from game_info
             video['home_team_name'] = game_info['home_team']
             video['away_team_name'] = game_info['away_team']
             video['home_team_abbreviation'] = game_info['home_abbr']
@@ -527,32 +457,28 @@ def process_single_game(game_info: Dict) -> Tuple[Dict, List[Dict], List[Dict]]:
             valid_videos.append(video)
             
         elif DEBUG_REJECTIONS:
-            # Video failed validation, record the reason for debugging
             video['reason'] = validation_result
             rejected_videos.append(video)
     
-    # Small delay to respect rate limits (per thread)
     time.sleep(SEARCH_DELAY) 
     
     return game_info, valid_videos, rejected_videos
 
 
-def run_parallel_collection(queries: List[Dict]) -> List[Dict]:
+def run_parallel_collection(queries: List[Dict], output_path: str) -> int:
     """
-    Orchestrate the parallel collection of video data for multiple games.
-    Distributes game queries across multiple worker threads for faster processing.
+    Orchestrate the parallel collection of video data with incremental saving.
     
     Args:
-        queries: List of game query dictionaries to process (from create_youtube_queries)
+        queries: List of game query dictionaries to process
+        output_path: Path to save results incrementally
     
     Returns:
-        List of dictionaries, each containing a valid video's data with:
-            - game_id: Associated NBA game identifier
-            - Video metadata (title, url, channel, duration, video_id)
-            - Engagement metrics (view_count, like_count, comment_count)
-            - Team information (names and abbreviations)
+        Total number of videos collected
     """
-    all_valid_videos = []
+    pending_results = []
+    processed_count = 0
+    total_videos_collected = 0
     
     # Create thread pool for parallel processing
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -560,35 +486,46 @@ def run_parallel_collection(queries: List[Dict]) -> List[Dict]:
         future_to_game = {executor.submit(process_single_game, q): q for q in queries}
         
         # Process results as they complete (with progress bar)
-        for future in tqdm(concurrent.futures.as_completed(future_to_game), 
-                          total=len(queries), 
-                          desc="Collecting game videos"):
-            original_game_info = future_to_game[future]
-            
-            try:
-                # Retrieve results from completed task
-                _, valid_videos, rejected_videos = future.result()
+        with tqdm(total=len(queries), desc="Collecting game videos") as pbar:
+            for future in concurrent.futures.as_completed(future_to_game):
+                original_game_info = future_to_game[future]
                 
-                # Log summary for this game query
-                print(f"\n--- Result for search: \"{original_game_info['query']}\" ---")
-                print(f"  > Found {len(valid_videos)} valid video(s).")
-                
-                # Log rejection details if debugging is enabled
-                if DEBUG_REJECTIONS and rejected_videos:
-                    print("  > Rejected videos:")
-                    for v in rejected_videos:
-                        print(f"    - {v['reason']}: {v['title']} ({v['url']})")
-                
-                # Add game_id to each valid video and append to final collection
-                for video in valid_videos:
-                    video['game_id'] = original_game_info['game_id']
-                    all_valid_videos.append(video)
+                try:
+                    _, valid_videos, rejected_videos = future.result()
+                    
+                    print(f"\n--- Result for search: \"{original_game_info['query']}\" ---")
+                    print(f"  > Found {len(valid_videos)} valid video(s).")
+                    
+                    if DEBUG_REJECTIONS and rejected_videos:
+                        print("  > Rejected videos:")
+                        for v in rejected_videos:
+                            print(f"    - {v['reason']}: {v['title']} ({v['url']})")
+                    
+                    # Add game_id to each valid video
+                    for video in valid_videos:
+                        video['game_id'] = original_game_info['game_id']
+                        pending_results.append(video)
+                        total_videos_collected += 1
 
-            except Exception as e:
-                # Log errors for failed queries
-                print(f"\n[ERROR] Task failed for query '{original_game_info['query']}': {e}")
+                except Exception as e:
+                    print(f"\n[ERROR] Task failed for query '{original_game_info['query']}': {e}")
+                
+                processed_count += 1
+                pbar.update(1)
+                
+                # Save incrementally
+                if processed_count % SAVE_EVERY == 0 or processed_count == len(queries):
+                    if pending_results:
+                        save_results_incremental(pending_results, output_path)
+                        pbar.set_description(f"✓ Saved {len(pending_results)} videos (Total: {total_videos_collected})")
+                        pending_results = []
     
-    return all_valid_videos
+    # Final save for any remaining results
+    if pending_results:
+        save_results_incremental(pending_results, output_path)
+        print(f"\n✓ Saved final {len(pending_results)} videos")
+    
+    return total_videos_collected
 
 
 # ============================================================================
@@ -597,15 +534,16 @@ def run_parallel_collection(queries: List[Dict]) -> List[Dict]:
 
 def main():
     """
-    Main execution pipeline for the YouTube highlight collector.
-    Loads game data, generates queries, collects videos in parallel, and saves results.
-    
-    Returns:
-        None
+    Main execution pipeline with resumability support.
     """
+    start_time = time.time()
+    
     print("="*60)
-    print("YOUTUBE NBA HIGHLIGHT COLLECTOR")
+    print("YOUTUBE NBA HIGHLIGHT COLLECTOR (RESUMABLE)")
     print("="*60)
+    
+    # Load existing results and get processed game_ids
+    existing_df, processed_game_ids = load_existing_results(URLS_CSV_OUTPUT)
     
     # Load game data from CSV file
     try:
@@ -615,70 +553,62 @@ def main():
         print(f"ERROR: Input file not found at '{GAMES_CSV_INPUT}'. Aborting.")
         return
 
-    # Convert game dates to datetime format for date validation
+    # Convert game dates to datetime format
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'])
-    df['game_date_str'] = df['GAME_DATE'].dt.strftime('%b %d %Y')  # Format: "Jan 15 2025"
+    df['game_date_str'] = df['GAME_DATE'].dt.strftime('%b %d %Y')
     
-    # Create formatted YouTube search queries for each game
+    # Create formatted YouTube search queries
     df['youtube_search_name'] = (
         df['HOME_TEAM_NAME'] + ' vs ' + df['AWAY_TEAM_NAME'] + 
         ' Full game highlights | ' + df['game_date_str'] + ' NBA Season'
     )
     
-    # Generate list of search queries with metadata
-    queries = create_youtube_queries(df)
+    # Generate list of search queries
+    all_queries = create_youtube_queries(df)
     
-    # Execute parallel collection across all games
-    print(f"\nStarting parallel collection with {MAX_WORKERS} workers for {len(queries)} games...")
-    collected_videos = run_parallel_collection(queries)
+    # Filter out already processed games
+    remaining_queries = [q for q in all_queries if q['game_id'] not in processed_game_ids]
     
-    # Save collected videos to output CSV file
-    if collected_videos:
-        # Create output directory if it doesn't exist
-        output_dir = os.path.dirname(URLS_CSV_OUTPUT)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        
-        # Convert collected videos to DataFrame for CSV export
-        results_df = pd.DataFrame(collected_videos)
-        
-        # Reorder columns for better readability
-        # Video info -> Engagement metrics -> Game ID
-        column_order = [
-            'game_id',
-            'title',
-            'url',
-            'video_id',
-            'channel',
-            'duration',
-            'view_count',
-            'like_count',
-            'comment_count',
-            #'home_team_name',
-            #'home_team_abbreviation',
-            #'away_team_name',
-            #'away_team_abbreviation'
-        ]
-        
-        # Only include columns that exist (in case some are missing)
-        existing_columns = [col for col in column_order if col in results_df.columns]
-        results_df = results_df[existing_columns]
-        
-        # Save to CSV with UTF-8 encoding to handle special characters
-        results_df.to_csv(URLS_CSV_OUTPUT, index=False, encoding='utf-8')
-        
-        # Display summary
-        print("\n" + "="*60)
-        print("COLLECTION COMPLETE")
-        print("="*60)
-        print(f"Total videos collected: {len(results_df)}")
-        print(f"Output file: {URLS_CSV_OUTPUT}")
-        print(f"\nColumns in output:")
-        for col in existing_columns:
-            print(f"  - {col}")
-        print("="*60)
+    if len(remaining_queries) < len(all_queries):
+        skipped = len(all_queries) - len(remaining_queries)
+        print(f"Skipping {skipped} already processed games.")
+    
+    if len(remaining_queries) == 0:
+        print("All games have already been processed!")
+        return
+    
+    # Execute parallel collection
+    print(f"\nStarting parallel collection with {MAX_WORKERS} workers for {len(remaining_queries)} games...")
+    print(f"Save frequency: Every {SAVE_EVERY} games")
+    print("="*60)
+    
+    videos_collected = run_parallel_collection(remaining_queries, URLS_CSV_OUTPUT)
+    
+    # Display final summary
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    hours = int(elapsed_time // 3600)
+    minutes = int((elapsed_time % 3600) // 60)
+    seconds = elapsed_time % 60
+    
+    print("\n" + "="*60)
+    print("COLLECTION COMPLETE")
+    print("="*60)
+    print(f"Videos collected (this session): {videos_collected}")
+    print(f"Total videos in results: {len(processed_game_ids) + videos_collected}")
+    print(f"Output file: {URLS_CSV_OUTPUT}")
+    
+    if hours > 0:
+        print(f"Total time: {hours}h {minutes}m {seconds:.2f}s")
+    elif minutes > 0:
+        print(f"Total time: {minutes}m {seconds:.2f}s")
     else:
-        print("\nNo valid videos were found. Output file was not created.")
+        print(f"Total time: {seconds:.2f}s")
+    
+    if len(remaining_queries) > 0:
+        print(f"Average time per game: {elapsed_time/len(remaining_queries):.2f}s")
+    print("="*60)
 
 
 if __name__ == "__main__":
