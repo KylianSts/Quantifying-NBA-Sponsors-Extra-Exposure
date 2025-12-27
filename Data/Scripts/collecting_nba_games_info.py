@@ -1,5 +1,5 @@
 """
-NBA Games and Player Stats Collector (Parallel Version)
+NBA Games and Player Stats Collector
 
 This script collects NBA game data and detailed player statistics from the official
 NBA Stats API. It uses parallel processing to speed up data collection while
@@ -27,8 +27,8 @@ import os
 # CONFIGURATION
 # ============================================================================
 
-# Target NBA season to collect data for (format: "YYYY-YY")
-TARGET_SEASON = "2025-26"
+# Target NBA season to collect data format
+TARGET_SEASON = "2024-25"
 
 # Season type: "Regular Season", "Playoffs", "Pre Season", "All Star"
 SEASON_TYPE = "Regular Season"
@@ -39,7 +39,7 @@ PLAYERS_OUTPUT_FILE = f"Data/exposure_and_game_info/nba_players_stats_{TARGET_SE
 
 # API rate limiting configuration
 API_DELAY = 0.2  # Delay between API calls in seconds (to avoid rate limiting)
-MAX_WORKERS = 16  # Number of parallel workers (keep low to respect API limits)
+MAX_WORKERS = 8  # Number of parallel workers
 
 
 # ============================================================================
@@ -80,7 +80,7 @@ def get_games_list(season: str, season_type: str) -> pd.DataFrame:
     # Separate Home and Away games based on MATCHUP format
     # 'vs.' indicates home team (e.g., "LAL vs. BOS")
     # '@' indicates away team (e.g., "BOS @ LAL")
-    mask_home = games_df['MATCHUP'].str.contains(' vs. ')
+    mask_home = games_df['MATCHUP'].str.contains(' vs. ', na=False)
     
     df_home = games_df[mask_home].copy()
     df_away = games_df[~mask_home].copy()
@@ -150,7 +150,6 @@ def get_players_stats_parallel(game_ids: List[str], max_workers: int = MAX_WORKE
     """
     print(f"\n--- Retrieving player stats for {len(game_ids)} games ---")
     print(f"Using {max_workers} parallel workers")
-    print("Note: This may take some time due to API rate limiting.\n")
     
     # Lists to track results and errors
     all_player_stats = []
