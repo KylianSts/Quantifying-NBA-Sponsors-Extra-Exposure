@@ -1,5 +1,5 @@
 """
-YouTube Video Collector for NBA Games (RESUMABLE VERSION)
+YouTube Video Collector for NBA Games
 
 This script automates the collection of YouTube highlight video URLs for a given
 list of NBA games. It operates in parallel to speed up the process and includes
@@ -26,8 +26,7 @@ from typing import List, Dict, Tuple, Union
 import time
 from tqdm import tqdm
 import concurrent.futures
-from datetime import timedelta
-
+from datetime import datetime, timedelta
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -309,7 +308,8 @@ def search_youtube_videos(query: str, max_results: int) -> List[Dict]:
                         'channel': entry.get('channel', ''),
                         'duration': duration if duration else 0,
                         'view_count': view_count if view_count else 0,
-                        'url': f"https://www.youtube.com/watch?v={entry['id']}"
+                        'url': f"https://www.youtube.com/watch?v={entry['id']}",
+                        'upload_date': entry.get('upload_date', '')
                     })
             
             return videos
@@ -413,6 +413,22 @@ def is_valid_video(video: Dict, game_info: Dict) -> Union[bool, str]:
     view_count = video.get('view_count', 0)
     if view_count < 1000:
         return f"Rejected (Insufficient Views: {view_count} views)"
+    
+    upload_date_str = video.get('upload_date')
+    if upload_date_str:
+        try:
+            # Parse YYYYMMDD string to datetime
+            upload_dt = datetime.strptime(upload_date_str, '%Y%m%d')
+            # Calculate the cutoff date (7 days ago)
+            cutoff_date = datetime.now() - timedelta(days=7)
+            
+            # If the video is newer (greater) than the cutoff, reject it
+            if upload_dt > cutoff_date:
+                 return f"Rejected (Too Recent: Uploaded {upload_dt.strftime('%Y-%m-%d')})"
+        except ValueError:
+            # If date format is missing or weird, we decide whether to pass or fail. 
+            # Usually safe to pass and let other checks handle it, or log it.
+            pass
     
     # Prepare text for analysis
     text = (video.get('title', '') + ' ' + (video.get('description') or '')).lower()
