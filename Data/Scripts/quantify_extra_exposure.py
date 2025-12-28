@@ -8,20 +8,23 @@ from tqdm import tqdm
 import threading
 import queue
 import time
-
+import numpy as np  
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-MODEL_PATH = "Models/models_results/modelisation_v6/yolo11s-obb_fine_tuned_v6/weights/best.pt"
+MODEL_PATH = "Models/models_results/modelisation_v7/yolo11s-obb_fine_tuned_v7/weights/best.pt"
 INPUT_CSV = "Data/urls/game_highlight_urls.csv"
-OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results_final.csv"
+OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results.csv"
 TEMP_DIR = "Data/temp_videos"
 
 # Detection Settings
-CONF_THRESH = 0.75
+CONF_THRESH = 0.8
 TARGET_FPS = 5
+
+# The class name for the ball 
+BALL_CLASS_NAME = "basketball" 
 
 BATCH_SIZE = 16
 DOWNLOAD_QUEUE_SIZE = 10
@@ -84,15 +87,12 @@ def download_worker(task_queue, ready_queue):
     
     # Fast download options
     ydl_opts = {
-        #'format': 'bestvideo[ext=mp4][height<=720]/best[ext=mp4]',
         'format': 'best[height<=720]/best',
         'quiet': True,
         'no_warnings': True,
-        #'extractor_args': {'youtube': {'player_client': ['android']}},
         'cookiesfrombrowser': ('firefox',),
         'concurrent_fragment_downloads': 8
     }
-
 
     while True:
         task = task_queue.get()
@@ -129,7 +129,8 @@ def download_worker(task_queue, ready_queue):
 
 def process_video_batched(video_path, model):
     """
-    Reads video, aggregates frames into batches, runs inference, returns stats.
+    Reads video, aggregates frames into batches, runs inference, 
+    returns stats INCLUDING avg distance to ball/center.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened(): return {}
@@ -139,7 +140,13 @@ def process_video_batched(video_path, model):
     skip_interval = max(1, round(fps / TARGET_FPS))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    # Frame dims for default center calculation
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    image_center = np.array([width / 2, height / 2])
+
     # Stats Storage
+    # Added 'total_dist' to accumulate distance in pixels
     results = {} 
     
     # Batch Storage
@@ -161,30 +168,56 @@ def process_video_batched(video_path, model):
         # If Batch is full or End of Video, Run Inference
         if len(batch_frames) == BATCH_SIZE or (not success and len(batch_frames) > 0):
             if batch_frames:
-                # RUN INFERENCE ON BATCH (Massive Speedup)
-                # verbose=False prevents console spam
+                # RUN INFERENCE ON BATCH
                 batch_results = model(batch_frames, conf=CONF_THRESH, verbose=False)
                 
                 # Process Batch Results
                 for res in batch_results:
                     if res.obb is not None:
                         classes = res.obb.cls.cpu().numpy().astype(int)
-                        boxes = res.obb.xyxyxyxy.cpu().numpy()
+                        boxes = res.obb.xyxyxyxy.cpu().numpy() # Shape: (N, 4, 2)
                         
-                        # Use set to ensure we count 1 frame per class even if multiple logos appear
+                        # Calculate centers of all boxes in this frame: (N, 2)
+                        box_centers = boxes.mean(axis=1)
+
+                        # 1. Determine Reference Point (Ball Center or Image Center)
+                        ref_point = image_center
+                        
+                        # Search for ball in detected classes
+                        for i, cls_id in enumerate(classes):
+                            if model.names[cls_id] == BALL_CLASS_NAME:
+                                ref_point = box_centers[i]
+                                break # Use the first ball found
+                        
+                        # 2. Process Brands
                         detected_in_frame = set()
                         
-                        for cls_id, box in zip(classes, boxes):
+                        for i, (cls_id, box) in enumerate(zip(classes, boxes)):
                             name = model.names[cls_id]
+                            
+                            # Skip measuring distance from ball to itself
+                            if name == BALL_CLASS_NAME:
+                                continue
+
                             area = cv2.contourArea(box)
                             
+                            # Calculate Distance (pixels)
+                            dist = np.linalg.norm(box_centers[i] - ref_point)
+                            
                             if name not in results: 
-                                results[name] = {'frames': 0, 'area': 0, 'detections': 0}
+                                results[name] = {
+                                    'frames': 0, 
+                                    'area': 0, 
+                                    'detections': 0, 
+                                    'total_dist': 0.0 # New Accumulator
+                                }
                             
                             results[name]['area'] += area
                             results[name]['detections'] += 1
+                            results[name]['total_dist'] += dist
                             detected_in_frame.add(name)
                         
+                        # Add frame count (exposure time logic)
                         for name in detected_in_frame:
                             results[name]['frames'] += 1
                 
@@ -259,7 +292,7 @@ def main():
     # 7. Main Loop (Consumer)
     pending_results = []  # Buffer for results before saving
     processed_count = 0
-    total_processed_overall = len(processed_video_ids)  # Track total including previously processed
+    total_processed_overall = len(processed_video_ids)
     
     print("\n" + "="*50)
     print("STARTING PARALLEL PIPELINE")
@@ -286,12 +319,19 @@ def main():
                 
                 # Format Results
                 for class_name, stats in metrics.items():
+                    
+                    # Compute Average Distance
+                    avg_dist = 0
+                    if stats['detections'] > 0:
+                        avg_dist = round(stats['total_dist'] / stats['detections'], 2)
+
                     pending_results.append({
                         'game_id': meta.get('game_id'),
                         'video_id': meta.get('video_id'),
                         'exposure_zone': class_name,
                         'exposure_time_seconds': round(stats['frames'] / TARGET_FPS, 2),
                         'average_box_area_pixels': round(stats['area'] / stats['detections'], 2),
+                        'average_dist_to_ball_pixels': avg_dist, # NEW COLUMN
                         'video_url': meta.get('url')
                     })
                     
