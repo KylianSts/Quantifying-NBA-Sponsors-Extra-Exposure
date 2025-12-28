@@ -27,6 +27,7 @@ import time
 from tqdm import tqdm
 import concurrent.futures
 from datetime import datetime, timedelta
+import csv
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -35,7 +36,7 @@ from datetime import datetime, timedelta
 GAMES_CSV_INPUT = "Data/exposure_and_game_info/nba_games_2025-26.csv"
 
 # Output CSV file where valid video URLs will be saved
-URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls.csv"
+URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls_test.csv"
 
 # Maximum number of search results to retrieve per game query
 MAX_RESULTS_PER_QUERY = 10
@@ -125,10 +126,6 @@ def load_existing_results(output_path: str) -> Tuple[pd.DataFrame, set]:
 def save_results_incremental(new_videos: List[Dict], output_path: str):
     """
     Append new video results to the CSV file (or create if doesn't exist).
-    
-    Args:
-        new_videos: List of video dictionaries to save
-        output_path: Path to the output CSV file
     """
     if not new_videos:
         return
@@ -155,13 +152,15 @@ def save_results_incremental(new_videos: List[Dict], output_path: str):
     try:
         if os.path.exists(output_path):
             # Append to existing file
-            new_df.to_csv(output_path, mode='a', header=False, index=False, encoding='utf-8')
+            # AJOUT DE: quoting=csv.QUOTE_NONNUMERIC
+            new_df.to_csv(output_path, mode='a', header=False, index=False, encoding='utf-8', quoting=csv.QUOTE_NONNUMERIC)
         else:
             # Create new file with header
             output_dir = os.path.dirname(output_path)
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
-            new_df.to_csv(output_path, index=False, encoding='utf-8')
+            # AJOUT DE: quoting=csv.QUOTE_NONNUMERIC
+            new_df.to_csv(output_path, index=False, encoding='utf-8', quoting=csv.QUOTE_NONNUMERIC)
     except Exception as e:
         print(f"\n[SAVE ERROR] Could not save results: {e}")
 
