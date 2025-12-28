@@ -32,7 +32,7 @@ from tqdm import tqdm
 JSON_SOURCE_FILE = "Data/json_files/yolo_label_studio.json"
 
 # Directory containing the annotated images
-SOURCE_IMAGES_DIR = "Data/images/train_images"
+SOURCE_IMAGES_DIR = "Data/images/train_images_quality"
 
 # Output directory for the YOLO-formatted dataset
 YOLO_DATASET_DIR = "Data/yolo_dataset"
@@ -46,7 +46,8 @@ CLASS_NAMES = [
     "basket-logo",           # Class 1: Logos near baskets
     "mid-court-logo",        # Class 2: Center court logos
     "side-court-led-logo",   # Class 3: LED display logos on sidelines
-    "side-court-logo"        # Class 4: Static logos on sidelines
+    "side-court-logo",       # Class 4: Static logos on sidelines
+    "basketball"             # Class 5: Basketball
 ]
 
 # ============================================================================
