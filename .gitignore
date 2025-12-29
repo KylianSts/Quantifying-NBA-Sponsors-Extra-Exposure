@@ -5,8 +5,8 @@ label_studio.venv
 # Heavy data
 Data/images
 Data/yolo_dataset
-Data/demonstration_video.mp4
 Data/temp_videos
+Data/demos
 
 # Yolo models
 Models/yolo
