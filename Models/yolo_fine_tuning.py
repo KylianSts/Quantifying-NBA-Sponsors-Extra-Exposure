@@ -30,7 +30,7 @@ from typing import List, Dict
 # ============================================================================
 
 # Path to Label Studio JSON export containing all annotations
-JSON_SOURCE_FILE = "Data/json_files/yolo_label_studio_clean.json"
+JSON_SOURCE_FILE = "Data/json_files/yolo_label_studio.json"
 
 # Path to YOLO dataset configuration file 
 DATASET_YAML_PATH = 'Data/yolo_dataset/nba_sponsor_dataset.yaml'
@@ -40,12 +40,12 @@ MODEL_TO_USE = 'Models/yolo/yolo11s-obb.pt'
 
 # Training hyperparameters
 EPOCHS = 50  # Number of training epochs 
-IMAGE_SIZE = 1024  # Input image size in pixels
+IMAGE_SIZE = 1280  # Input image size in pixels
 BATCH_SIZE = 4  # Number of images per batch
 
 # Output directory structure
-PROJECT_NAME = 'Models/models_results/modelisation_v7'  # Parent folder for this dataset version
-EXPERIMENT_NAME = 'yolo11s-obb_fine_tuned_v7'  # Specific name for this training run
+PROJECT_NAME = 'Models/models_results/modelisation_v11'  # Parent folder for this dataset version
+EXPERIMENT_NAME = f'yolo11s-obb_fine_tuned_v11_{IMAGE_SIZE}'  # Specific name for this training run
 
 # ============================================================================
 # EDA FUNCTIONS
