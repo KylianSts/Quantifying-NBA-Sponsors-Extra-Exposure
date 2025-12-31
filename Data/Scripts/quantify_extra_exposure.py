@@ -8,382 +8,355 @@ from tqdm import tqdm
 import threading
 import queue
 import time
-import numpy as np  
+import numpy as np
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-MODEL_PATH = "Models/models_results/modelisation_v7/yolo11s-obb_fine_tuned_v7/weights/best.pt"
+MODEL_PATH = "Models/models_results/modelisation_v10/yolo11s-obb_fine_tuned_v10_1280/weights/best.pt"
 INPUT_CSV = "Data/urls/game_highlight_urls.csv"
-OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results.csv"
+OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results_normalized.csv" 
 TEMP_DIR = "Data/temp_videos"
 
 # Detection Settings
-CONF_THRESH = 0.8
+CONF_THRESH = 0.6
 TARGET_FPS = 5
+BALL_CLASS_NAME = "basketball"
+INPUT_SIZE = 1024
 
-# The class name for the ball 
-BALL_CLASS_NAME = "basketball" 
+# Distance calculation logic 
+PERSISTENCE_WINDOW = TARGET_FPS 
 
-BATCH_SIZE = 16
-DOWNLOAD_QUEUE_SIZE = 10
+# Performance Settings
+BATCH_SIZE = 32
+NUM_DOWNLOADERS = 1
+DOWNLOAD_QUEUE_SIZE = 3
+SAVE_EVERY = 1
 
-# Save frequency (number of videos)
-SAVE_EVERY = 3
+# GPU Optimizations
+torch.backends.cudnn.benchmark = True
+if torch.cuda.is_available():
+    torch.set_float32_matmul_precision('high')
 
 # ============================================================================
-# HELPER: LOAD EXISTING RESULTS
+# HELPER: FILE MANAGEMENT
 # ============================================================================
 
 def load_existing_results(output_path):
-    """
-    Load existing results CSV and return both the dataframe and a set of processed video_ids.
-    """
     if os.path.exists(output_path):
         try:
             df = pd.read_csv(output_path)
-            processed_video_ids = set(df['video_id'].unique())
-            print(f"Found existing results with {len(processed_video_ids)} already processed videos.")
-            return df, processed_video_ids
+            if 'video_id' in df.columns:
+                processed_video_ids = set(df['video_id'].unique())
+                print(f"✓ Resuming: {len(processed_video_ids)} videos already processed.")
+                return df, processed_video_ids
         except Exception as e:
-            print(f"Error loading existing results: {e}")
-            return pd.DataFrame(), set()
+            print(f"⚠ CSV reading error: {e}")
     return pd.DataFrame(), set()
 
-# ============================================================================
-# HELPER: SAVE RESULTS INCREMENTALLY
-# ============================================================================
+save_lock = threading.Lock()
 
 def save_results_incremental(new_results, output_path):
-    """
-    Append new results to the CSV file (or create if doesn't exist).
-    """
-    if not new_results:
-        return
-    
+    if not new_results: return
     new_df = pd.DataFrame(new_results)
-    
-    try:
-        if os.path.exists(output_path):
-            # Append to existing file
-            new_df.to_csv(output_path, mode='a', header=False, index=False)
-        else:
-            # Create new file with header
-            new_df.to_csv(output_path, index=False)
-    except Exception as e:
-        print(f"\n[SAVE ERROR] Could not save results: {e}")
+    with save_lock:
+        try:
+            mode = 'a' if os.path.exists(output_path) else 'w'
+            header = not os.path.exists(output_path)
+            new_df.to_csv(output_path, mode=mode, header=header, index=False)
+            return True
+        except Exception as e:
+            print(f"\n[SAVE ERROR] {e}")
+            return False
 
 # ============================================================================
-# WORKER: VIDEO DOWNLOADER (Runs in separate thread)
+# WORKER: DOWNLOAD
 # ============================================================================
 
-def download_worker(task_queue, ready_queue):
-    """
-    Constantly pulls URLs from task_queue, downloads them, 
-    and puts the file path into ready_queue.
-    """
+def download_worker(task_queue, ready_queue, worker_id):
     os.makedirs(TEMP_DIR, exist_ok=True)
-    
-    # Fast download options
     ydl_opts = {
-        'format': 'best[height<=720]/best',
-        'quiet': True,
-        'no_warnings': True,
+        'format': 'best[height<=480]/best',
+        'quiet': True, 'no_warnings': True,
         'cookiesfrombrowser': ('firefox',),
-        'concurrent_fragment_downloads': 8
+        #'concurrent_fragment_downloads': 8,
     }
 
     while True:
-        task = task_queue.get()
-        if task is None: # Sentinel signal to stop
+        try:
+            task = task_queue.get(timeout=1)
+        except queue.Empty: continue
+        if task is None:
             ready_queue.put(None)
             break
             
-        video_id = task['video_id']
-        url = task['url']
-        output_path = os.path.join(TEMP_DIR, f"{video_id}.mp4")
-        
-        # Configure output for this specific file
+        output_path = os.path.join(TEMP_DIR, f"{task['video_id']}.mp4")
         current_opts = ydl_opts.copy()
         current_opts['outtmpl'] = output_path
         
         try:
-            # Only download if not exists (resuming support)
             if not os.path.exists(output_path):
                 with yt_dlp.YoutubeDL(current_opts) as ydl:
-                    ydl.download([url])
-            
-            # Send to Analyzer
+                    ydl.download([task['url']])
             ready_queue.put({'path': output_path, 'meta': task})
-            
-        except Exception as e:
-            print(f"\n[DOWNLOAD ERROR] {video_id}: {e}")
-            # Even if failed, we mark task as done so pipeline continues
-        
-        task_queue.task_done()
+        except Exception:
+            pass # Ignore download errors to continue
+        finally:
+            task_queue.task_done()
 
 # ============================================================================
-# CORE: BATCH ANALYZER (Runs on Main Thread/GPU)
+# CORE: ANALYZER WITH "SMART REFERENCE" LOGIC
 # ============================================================================
 
 def process_video_batched(video_path, model):
-    """
-    Reads video, aggregates frames into batches, runs inference, 
-    returns stats INCLUDING avg distance to ball/center.
-    """
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened(): return {}
+    if not cap.isOpened(): return {}, {}
 
-    # Video Props
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    skip_interval = max(1, round(fps / TARGET_FPS))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    # Frame dims for default center calculation
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    image_center = np.array([width / 2, height / 2])
+    skip_interval = max(1, round(fps / TARGET_FPS))
+    
+    video_meta = {'fps': fps, 'skip_interval': skip_interval, 'width': width, 'height': height}
+    
+    # --- MEMORY STATE (SMART REFERENCE) ---
+    # Initialize ball state for this video
+    ball_state = {
+        'last_center': None,  # Coordinates (x, y)
+        'lost_count': 9999,   # Number of frames since loss
+        'image_center': np.array([width / 2, height / 2], dtype=np.float32)
+    }
 
-    # Stats Storage
-    # Added 'total_dist' to accumulate distance in pixels
-    results = {} 
-    
-    # Batch Storage
+    results = {}
     batch_frames = []
-    
-    # Progress Bar
-    pbar = tqdm(total=total_frames, desc="  GPU Inference", leave=False, unit="frames")
-    
     frame_idx = 0
+
     while True:
-        # Optimized Reading: Grab is faster than Read if we skip
         if frame_idx % skip_interval == 0:
             success, frame = cap.read()
             if not success: break
             batch_frames.append(frame)
         else:
-            if not cap.grab(): break # End of video
-            
-        # If Batch is full or End of Video, Run Inference
-        if len(batch_frames) == BATCH_SIZE or (not success and len(batch_frames) > 0):
-            if batch_frames:
-                # RUN INFERENCE ON BATCH
-                batch_results = model(batch_frames, conf=CONF_THRESH, verbose=False)
-                
-                # Process Batch Results
-                for res in batch_results:
-                    if res.obb is not None:
-                        classes = res.obb.cls.cpu().numpy().astype(int)
-                        boxes = res.obb.xyxyxyxy.cpu().numpy() # Shape: (N, 4, 2)
-                        
-                        # Calculate centers of all boxes in this frame: (N, 2)
-                        box_centers = boxes.mean(axis=1)
-
-                        # 1. Determine Reference Point (Ball Center or Image Center)
-                        ref_point = image_center
-                        
-                        # Search for ball in detected classes
-                        for i, cls_id in enumerate(classes):
-                            if model.names[cls_id] == BALL_CLASS_NAME:
-                                ref_point = box_centers[i]
-                                break # Use the first ball found
-                        
-                        # 2. Process Brands
-                        detected_in_frame = set()
-                        
-                        for i, (cls_id, box) in enumerate(zip(classes, boxes)):
-                            name = model.names[cls_id]
-                            
-                            # Skip measuring distance from ball to itself
-                            if name == BALL_CLASS_NAME:
-                                continue
-
-                            area = cv2.contourArea(box)
-                            
-                            # Calculate Distance (pixels)
-                            dist = np.linalg.norm(box_centers[i] - ref_point)
-                            
-                            if name not in results: 
-                                results[name] = {
-                                    'frames': 0, 
-                                    'area': 0, 
-                                    'detections': 0, 
-                                    'total_dist': 0.0 # New Accumulator
-                                }
-                            
-                            results[name]['area'] += area
-                            results[name]['detections'] += 1
-                            results[name]['total_dist'] += dist
-                            detected_in_frame.add(name)
-                        
-                        # Add frame count (exposure time logic)
-                        for name in detected_in_frame:
-                            results[name]['frames'] += 1
-                
-                # Clear batch
-                batch_frames = []
+            if not cap.grab(): break
+        
+        if len(batch_frames) >= BATCH_SIZE:
+            # Pass ball_state so it gets updated frame by frame
+            _process_batch(batch_frames, model, results, ball_state)
+            batch_frames = []
         
         frame_idx += 1
-        pbar.update(1)
 
-    pbar.close()
+    if batch_frames:
+        _process_batch(batch_frames, model, results, ball_state)
+
     cap.release()
-    return results
+    return results, video_meta
+
+def _process_batch(frames, model, results, ball_state):
+    """
+    Process a batch but apply sequential logic for ball memory.
+    """
+    with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
+        batch_results = model(frames, imgsz=INPUT_SIZE, conf=CONF_THRESH, verbose=False, half=True)
+    
+    # Iterate SEQUENTIALLY over batch results to maintain temporal coherence
+    for res in batch_results:
+        
+        img_h, img_w = res.orig_shape
+        img_diag = np.sqrt(img_w**2 + img_h**2)
+        img_area = img_w * img_h
+
+        # Retrieve YOLO data
+        if res.obb is None: 
+            # If no detection, just increment loss counter
+            ball_state['lost_count'] += 1
+            # No logos detected, so nothing to calculate for this frame
+            continue
+
+        classes = res.obb.cls.cpu().numpy().astype(int)
+        boxes = res.obb.xyxyxyxy.cpu().numpy()
+        confs = res.obb.conf.cpu().numpy()
+        
+        # Centers of all boxes
+        box_centers = boxes.mean(axis=1).astype(np.float32)
+        
+        # --- 1. SMART BALL LOGIC (Inspired by provided code) ---
+        
+        # Find index of best ball (max confidence)
+        ball_indices = [i for i, c in enumerate(classes) if model.names[c] == BALL_CLASS_NAME]
+        
+        current_ball_center = None
+        if ball_indices:
+            best_idx = ball_indices[np.argmax(confs[ball_indices])]
+            current_ball_center = box_centers[best_idx]
+
+        # Determine Reference Point (REF)
+        ref_point = None
+        
+        if current_ball_center is not None:
+            # CASE 1: Ball visible -> It's the reference
+            ref_point = current_ball_center
+            ball_state['last_center'] = current_ball_center
+            ball_state['lost_count'] = 0
+            
+        elif ball_state['last_center'] is not None and ball_state['lost_count'] < PERSISTENCE_WINDOW:
+            # CASE 2: Ball recently lost -> Use memory (Ghost Point)
+            ref_point = ball_state['last_center']
+            ball_state['lost_count'] += 1
+            
+        else:
+            # CASE 3: Ball lost for long time -> Use image center
+            ref_point = ball_state['image_center']
+            ball_state['lost_count'] += 1
+
+        # --- 2. STATISTICS CALCULATION ---
+
+        areas_px = np.array([cv2.contourArea(box) for box in boxes])
+        
+        detected_in_this_frame = set()
+
+        for i, cls_id in enumerate(classes):
+            name = model.names[cls_id]
+            
+            if name == BALL_CLASS_NAME:
+                continue
+            
+            if name not in results:
+                results[name] = {
+                    'frames': 0,
+                    'norm_area_acc': 0.0,
+                    'detections': 0,
+                    'norm_dist_acc': 0.0,
+                    'dist_samples': 0  # Counter for distance average
+                }
+            
+            # Area (Always calculated)
+            results[name]['norm_area_acc'] += float(areas_px[i] / img_area)
+            results[name]['detections'] += 1
+            
+            # Distance (Calculated relative to "ref_point" determined above)
+            # Since we ALWAYS have a ref_point (Ball, Memory, or Center), we always calculate.
+            dist_px = np.linalg.norm(box_centers[i] - ref_point)
+            norm_dist = dist_px / img_diag
+            
+            results[name]['norm_dist_acc'] += float(norm_dist)
+            results[name]['dist_samples'] += 1
+            
+            detected_in_this_frame.add(name)
+        
+        for name in detected_in_this_frame:
+            results[name]['frames'] += 1
 
 # ============================================================================
-# MAIN PIPELINE
+# MAIN
 # ============================================================================
 
 def main():
     start_time = time.time()
-
-    # 1. Load Model (Force GPU)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Initializing YOLO on {device.upper()} (RTX Optimization Enabled)...")
-    if device == 'cpu': print("WARNING: GPU not detected. Processing will be slow.")
     
+    # Setup
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Loading on {device.upper()}...")
     try:
         model = YOLO(MODEL_PATH)
         model.to(device)
     except Exception as e:
-        print(f"Error loading model: {e}")
+        print(f" Model error: {e}")
         return
 
-    # 2. Load existing results and get already processed video IDs
-    existing_df, processed_video_ids = load_existing_results(OUTPUT_CSV)
-
-    # 3. Prepare Queues
-    task_queue = queue.Queue()
-    ready_queue = queue.Queue(maxsize=DOWNLOAD_QUEUE_SIZE) 
-
-    # 4. Load Data and filter out already processed videos
+    # Load CSV
+    existing_df, processed_ids = load_existing_results(OUTPUT_CSV)
     try:
         df = pd.read_csv(INPUT_CSV)
-        all_tasks = df.to_dict('records')
-        
-        # Filter out already processed videos
-        video_tasks = [task for task in all_tasks if task['video_id'] not in processed_video_ids]
-        
-        if len(video_tasks) < len(all_tasks):
-            skipped = len(all_tasks) - len(video_tasks)
-            print(f"Skipping {skipped} already processed videos.")
-        
-        if len(video_tasks) == 0:
-            print("All videos have already been processed!")
-            return
-            
-    except FileNotFoundError:
-        print("Input CSV not found.")
+        video_tasks = [t for t in df.to_dict('records') if str(t['video_id']) not in processed_ids]
+    except FileNotFoundError: return
+
+    if not video_tasks:
+        print("✓ Everything already processed.")
         return
 
-    # 5. Fill Task Queue
-    print(f"Queuing {len(video_tasks)} videos for processing...")
-    for task in video_tasks:
-        task_queue.put(task)
-    # Add sentinel for the downloader
-    task_queue.put(None) 
-
-    # 6. Start Download Thread
-    downloader = threading.Thread(target=download_worker, args=(task_queue, ready_queue))
-    downloader.daemon = True
-    downloader.start()
-
-    # 7. Main Loop (Consumer)
-    pending_results = []  # Buffer for results before saving
-    processed_count = 0
-    total_processed_overall = len(processed_video_ids)
+    # Thread Pipeline
+    task_queue = queue.Queue()
+    ready_queue = queue.Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     
-    print("\n" + "="*50)
-    print("STARTING PARALLEL PIPELINE")
-    print(f"Batch Size: {BATCH_SIZE} | Target FPS: {TARGET_FPS}")
-    print(f"Save Frequency: Every {SAVE_EVERY} videos")
-    print("="*50)
+    downloaders = []
+    for i in range(NUM_DOWNLOADERS):
+        t = threading.Thread(target=download_worker, args=(task_queue, ready_queue, i), daemon=True)
+        t.start()
+        downloaders.append(t)
 
-    with tqdm(total=len(video_tasks), desc="Total Progress") as main_pbar:
+    for task in video_tasks: task_queue.put(task)
+    for _ in range(NUM_DOWNLOADERS): task_queue.put(None)
+
+    # Processing loop
+    pending_results = []
+    processed_count = 0
+    
+    print(f"\nProcessing {len(video_tasks)} videos...")
+    print(f"Distance Strategy: Ball -> Memory ({PERSISTENCE_WINDOW} frames) -> Center")
+    print("="*60)
+
+    with tqdm(total=len(video_tasks), unit="vid") as pbar:
+        active_downloaders = NUM_DOWNLOADERS
+        
         while processed_count < len(video_tasks):
-            # Get next downloaded video (blocks if download is slower than GPU)
-            item = ready_queue.get()
-            
-            if item is None: # Sentinel
-                break
-                
+            try:
+                item = ready_queue.get(timeout=2)
+            except queue.Empty:
+                if active_downloaders == 0: break
+                continue
+
+            if item is None:
+                active_downloaders -= 1
+                continue
+
             path = item['path']
             meta = item['meta']
             
-            # ANALYZE
-            main_pbar.set_description(f"Processing: {meta['video_id']}")
-            
             try:
-                metrics = process_video_batched(path, model)
+                metrics, vid_meta = process_video_batched(path, model)
                 
-                # Format Results
                 for class_name, stats in metrics.items():
+                    # Final calculations
+                    real_exposure = stats['frames'] * (vid_meta['skip_interval'] / vid_meta['fps']) if vid_meta['fps'] else 0
                     
-                    # Compute Average Distance
-                    avg_dist = 0
+                    avg_area = 0
                     if stats['detections'] > 0:
-                        avg_dist = round(stats['total_dist'] / stats['detections'], 2)
+                        avg_area = (stats['norm_area_acc'] / stats['detections']) * 100
+                    
+                    # Distance average (now calculated on almost all frames)
+                    avg_dist = 0
+                    if stats['dist_samples'] > 0:
+                        avg_dist = (stats['norm_dist_acc'] / stats['dist_samples']) * 100
 
                     pending_results.append({
                         'game_id': meta.get('game_id'),
                         'video_id': meta.get('video_id'),
                         'exposure_zone': class_name,
-                        'exposure_time_seconds': round(stats['frames'] / TARGET_FPS, 2),
-                        'average_box_area_pixels': round(stats['area'] / stats['detections'], 2),
-                        'average_dist_to_ball_pixels': avg_dist, # NEW COLUMN
+                        'exposure_time_seconds': round(real_exposure, 2),
+                        'avg_area_pct': round(avg_area, 4),
+                        'avg_dist_ref_pct': round(avg_dist, 2), # Renamed for clarity
                         'video_url': meta.get('url')
                     })
-                    
-            except Exception as e:
-                print(f"\nError analyzing {meta['video_id']}: {e}")
-            finally:
-                # CLEANUP FILE IMMEDIATELY
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except: pass
-                
-                processed_count += 1
-                total_processed_overall += 1
-                main_pbar.update(1)
-                
-                # SAVE INCREMENTALLY
-                if processed_count % SAVE_EVERY == 0 or processed_count == len(video_tasks):
-                    if pending_results:
-                        save_results_incremental(pending_results, OUTPUT_CSV)
-                        main_pbar.set_description(f"✓ Saved {len(pending_results)} results ({total_processed_overall} total)")
-                        pending_results = []  # Clear buffer after saving
 
-    # 8. Final save for any remaining results
+            except Exception as e:
+                print(f"Error {meta.get('video_id')}: {e}")
+            finally:
+                if os.path.exists(path):
+                    try: os.remove(path)
+                    except: pass
+                processed_count += 1
+                pbar.update(1)
+                
+                if processed_count % SAVE_EVERY == 0:
+                    if save_results_incremental(pending_results, OUTPUT_CSV):
+                        pending_results = []
+
     if pending_results:
         save_results_incremental(pending_results, OUTPUT_CSV)
-        print(f"\n✓ Saved final {len(pending_results)} results")
 
-    print(f"\nDone! All results saved to {OUTPUT_CSV}")
-
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    
-    # Format time nicely
-    hours = int(elapsed_time // 3600)
-    minutes = int((elapsed_time % 3600) // 60)
-    seconds = elapsed_time % 60
-    
-    print("\n" + "="*50)
-    print("EXECUTION TIME")
-    print("="*50)
-    if hours > 0:
-        print(f"Total time: {hours}h {minutes}m {seconds:.2f}s")
-    elif minutes > 0:
-        print(f"Total time: {minutes}m {seconds:.2f}s")
-    else:
-        print(f"Total time: {seconds:.2f}s")
-    print(f"Videos processed (this session): {processed_count}")
-    print(f"Total videos in results: {total_processed_overall}")
-    if processed_count > 0:
-        print(f"Average time per video: {elapsed_time/processed_count:.2f}s")
-    print("="*50)
+    print("\n✓ COMPLETED")
 
 if __name__ == "__main__":
     main()
