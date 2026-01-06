@@ -1,0 +1,9 @@
+Class                     mAP50        mAP50-95    
+-------------------------------------------------------
+all                       0.950        0.867       
+back-court-logo           0.995        0.907       
+basket-logo               0.976        0.933       
+mid-court-logo            0.953        0.847       
+side-court-led-logo       0.980        0.915       
+side-court-logo           0.956        0.864       
+basketball                0.841        0.738       
