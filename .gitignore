@@ -15,5 +15,11 @@ Models\models_results\modelisation_v4\yolov8l-obb_fine_tuned_v4\weights
 Models\models_results\modelisation_v5\yolov8x-obb_fine_tuned_v5\weights
 Models\models_results\modelisation_v6\yolov8l-obb_fine_tuned_v6\weights
 
+# Medel evaluation 
+Models/models_results/modelisation_v10/evaluation/errors
+Models/models_results/modelisation_v10/evaluation/interpretability
+Models/models_results/modelisation_v10/evaluation/corrected_hallucinations
+
 # Other 
-to_do.md
+Data/exposure_and_game_info/exposure_result.log
+Data/Scripts/test.py
