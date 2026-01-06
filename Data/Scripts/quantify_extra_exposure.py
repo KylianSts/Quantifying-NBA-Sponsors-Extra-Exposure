@@ -1,3 +1,18 @@
+"""
+Brand Exposure Analysis System for Basketball Videos
+=====================================================
+
+This system processes basketball game highlight videos to detect and measure
+brand logo exposure using computer vision and deep learning techniques.
+
+Key Features:
+- Automated video downloading from URLs
+- YOLO-based object detection (OBB - Oriented Bounding Boxes)
+- Multi-threaded video processing
+- Advanced quality scoring (QI Score) combining attention, size, and clutter
+- Incremental CSV output with fault tolerance
+"""
+
 import os
 import cv2
 import pandas as pd
@@ -9,354 +24,1072 @@ import threading
 import queue
 import time
 import numpy as np
+import sys
+import math
+import logging
+from typing import Dict, List, Tuple, Optional, Set
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
+# Model and file paths
 MODEL_PATH = "Models/models_results/modelisation_v10/yolo11s-obb_fine_tuned_v10_1280/weights/best.pt"
-INPUT_CSV = "Data/urls/game_highlight_urls.csv"
-OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results_normalized.csv" 
+INPUT_CSV = "Data/urls/game_highlight_urls_2024_25.csv"
+OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results_2024_25.csv"
 TEMP_DIR = "Data/temp_videos"
 
-# Detection Settings
-CONF_THRESH = 0.6
-TARGET_FPS = 5
-BALL_CLASS_NAME = "basketball"
-INPUT_SIZE = 1024
+# Detection parameters
+CONF_THRESH = 0.6              # Minimum confidence threshold for detections
+TARGET_FPS = 5                 # Target frame rate for processing
+BALL_CLASS_NAME = "basketball" # Class name for basketball detection
+INPUT_SIZE = 1024              # Input size for YOLO model
 
-# Distance calculation logic 
-PERSISTENCE_WINDOW = TARGET_FPS 
+# Tracking and fusion parameters
+PERSISTENCE_WINDOW = TARGET_FPS * 1.5  # Frames to persist ball location
+MERGE_IOU_THRESH = 0.10                # IoU threshold for merging overlapping detections
+MERGE_CONTAINMENT_THRESH = 0.50        # Containment threshold for merging
 
-# Performance Settings
-BATCH_SIZE = 32
-NUM_DOWNLOADERS = 1
-DOWNLOAD_QUEUE_SIZE = 3
-SAVE_EVERY = 1
+# Performance parameters
+BATCH_SIZE = 32           # Number of frames to process in batch
+NUM_DOWNLOADERS = 3       # Number of concurrent download threads
+DOWNLOAD_QUEUE_SIZE = 6   # Maximum videos in download queue
+SAVE_EVERY = 10            # Save results every N videos
 
-# GPU Optimizations
+# Timeout parameters
+DOWNLOAD_TIMEOUT = 600      # Timeout for video download (seconds)
+VIDEO_PROCESS_TIMEOUT = 3000  # Timeout for video processing (seconds)
+MAX_DOWNLOAD_RETRIES = 3   # Maximum download retry attempts
+
+# GPU optimization
 torch.backends.cudnn.benchmark = True
 if torch.cuda.is_available():
     torch.set_float32_matmul_precision('high')
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('Data/exposure_and_game_info/brand_exposure_analysis.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # ============================================================================
-# HELPER: FILE MANAGEMENT
+# FILE INITIALIZATION
 # ============================================================================
 
-def load_existing_results(output_path):
+def initialize_files() -> None:
+    """
+    Initialize required files and directories for the analysis pipeline.
+    
+    Creates:
+    - Input/output directories if they don't exist
+    - Template CSV files with proper column headers
+    - Validates model file existence
+    
+    Raises:
+        SystemExit: If model file is not found or input CSV cannot be created
+    """
+    logger.info("Checking and creating required files...")
+    
+    # Create directories
+    for path in [INPUT_CSV, OUTPUT_CSV]:
+        directory = os.path.dirname(path)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+            logger.info(f"Created directory: {directory}")
+    
+    # Create temp directory for videos
+    os.makedirs(TEMP_DIR, exist_ok=True)
+            
+    # Check/create input CSV
+    if not os.path.exists(INPUT_CSV):
+        logger.warning(f"Input file not found: {INPUT_CSV}")
+        df_template = pd.DataFrame(columns=['video_id', 'url', 'game_id'])
+        df_template.to_csv(INPUT_CSV, index=False)
+        logger.info(f"Template file created. Please populate it with video data.")
+        sys.exit(0)
+
+    # Create output CSV with all metric columns
+    if not os.path.exists(OUTPUT_CSV):
+        logger.info(f"Creating results file: {OUTPUT_CSV}")
+        cols = [
+            'game_id', 'video_id', 'exposure_zone', 
+            'exposure_seconds', 'total_detections',
+            
+            # Scientific metrics (QI Score V2)
+            'qi_score_avg', 'qi_score_std',
+            
+            # QI Score components
+            'size_score_avg', 'size_score_std',         # Sigmoid size score
+            'sov_weighted_avg', 'sov_weighted_std',     # Weighted share of voice
+            'dist_score_avg', 'dist_score_std',         # Gaussian attention score
+
+            # Raw metrics for context
+            'conf_avg', 'conf_std',                     # AI confidence
+            'laplacian_avg', 'laplacian_std',           # Sharpness
+            'dist_raw_pct_avg', 'dist_raw_pct_std',     # Raw distance to ball (%)
+            'area_pct_avg', 'area_pct_std',             # Raw size (% of screen)
+            
+            'video_url'
+        ]
+        pd.DataFrame(columns=cols).to_csv(OUTPUT_CSV, index=False)
+    else:
+        logger.info("Results file found.")
+
+    # Validate model exists
+    if not os.path.exists(MODEL_PATH):
+        logger.critical(f"CRITICAL ERROR: Model not found at {MODEL_PATH}")
+        sys.exit(1)
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def calculate_stats(sum_val: float, sum_sq_val: float, n: int) -> Tuple[float, float]:
+    """
+    Calculate mean and standard deviation from accumulated statistics.
+    
+    Uses Welford's online algorithm for numerical stability.
+    
+    Args:
+        sum_val: Sum of all values
+        sum_sq_val: Sum of squared values
+        n: Number of samples
+        
+    Returns:
+        Tuple of (mean, standard_deviation)
+    """
+    if n == 0:
+        return 0.0, 0.0
+    
+    mean = sum_val / n
+    variance = (sum_sq_val / n) - (mean ** 2)
+    std = math.sqrt(max(0.0, variance))
+    
+    return mean, std
+
+
+def load_existing_results(output_path: str) -> Tuple[pd.DataFrame, Set[str]]:
+    """
+    Load previously processed results to avoid reprocessing.
+    
+    Args:
+        output_path: Path to the output CSV file
+        
+    Returns:
+        Tuple of (DataFrame of existing results, Set of processed video IDs)
+    """
     if os.path.exists(output_path):
         try:
             df = pd.read_csv(output_path)
             if 'video_id' in df.columns:
-                processed_video_ids = set(df['video_id'].unique())
-                print(f"✓ Resuming: {len(processed_video_ids)} videos already processed.")
-                return df, processed_video_ids
+                processed = set(df['video_id'].astype(str).unique())
+                logger.info(f"Found {len(processed)} previously processed videos.")
+                return df, processed
         except Exception as e:
-            print(f"⚠ CSV reading error: {e}")
+            logger.warning(f"Could not load existing results: {e}")
+    
     return pd.DataFrame(), set()
 
+
+# Thread-safe saving
 save_lock = threading.Lock()
 
-def save_results_incremental(new_results, output_path):
-    if not new_results: return
+def save_results_incremental(new_results: List[Dict], output_path: str) -> bool:
+    """
+    Save results incrementally to CSV file in a thread-safe manner.
+    
+    Args:
+        new_results: List of result dictionaries to append
+        output_path: Path to output CSV file
+        
+    Returns:
+        True if save was successful, False otherwise
+    """
+    if not new_results:
+        return True
+        
     new_df = pd.DataFrame(new_results)
+    
     with save_lock:
         try:
-            mode = 'a' if os.path.exists(output_path) else 'w'
-            header = not os.path.exists(output_path)
+            file_exists = os.path.exists(output_path)
+            header = not file_exists or os.stat(output_path).st_size == 0
+            mode = 'a' if file_exists else 'w'
             new_df.to_csv(output_path, mode=mode, header=header, index=False)
+            logger.debug(f"Saved {len(new_results)} results to {output_path}")
             return True
         except Exception as e:
-            print(f"\n[SAVE ERROR] {e}")
+            logger.error(f"Save error: {e}")
             return False
 
 # ============================================================================
-# WORKER: DOWNLOAD
+# DETECTION MERGING LOGIC
 # ============================================================================
 
-def download_worker(task_queue, ready_queue, worker_id):
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    ydl_opts = {
-        'format': 'best[height<=480]/best',
-        'quiet': True, 'no_warnings': True,
-        'cookiesfrombrowser': ('firefox',),
-        #'concurrent_fragment_downloads': 8,
+def should_merge(box1: np.ndarray, box2: np.ndarray) -> bool:
+    """
+    Determine if two bounding boxes should be merged based on IoU and containment.
+    
+    Args:
+        box1: First bounding box as 4x2 array of corner points
+        box2: Second bounding box as 4x2 array of corner points
+        
+    Returns:
+        True if boxes should be merged, False otherwise
+    """
+    # Get bounding rectangles
+    x_min1, y_min1 = box1.min(axis=0)
+    x_max1, y_max1 = box1.max(axis=0)
+    x_min2, y_min2 = box2.min(axis=0)
+    x_max2, y_max2 = box2.max(axis=0)
+    
+    # Check if boxes overlap
+    if (x_max1 < x_min2 or x_max2 < x_min1 or 
+        y_max1 < y_min2 or y_max2 < y_min1):
+        return False
+    
+    # Calculate areas
+    area1 = cv2.contourArea(box1)
+    area2 = cv2.contourArea(box2)
+    
+    if area1 == 0 or area2 == 0:
+        return False
+    
+    # Calculate intersection
+    try:
+        inter, _ = cv2.intersectConvexConvex(
+            box1.astype(np.float32), 
+            box2.astype(np.float32)
+        )
+    except:
+        return False
+    
+    if inter <= 0:
+        return False
+    
+    # Calculate union
+    union = area1 + area2 - inter
+    if union <= 0:
+        return False
+    
+    # Check IoU threshold
+    iou = inter / union
+    if iou > MERGE_IOU_THRESH:
+        return True
+    
+    # Check containment threshold
+    containment = inter / min(area1, area2)
+    if containment > MERGE_CONTAINMENT_THRESH:
+        return True
+    
+    return False
+
+
+def consolidate_detections(
+    boxes: np.ndarray, 
+    classes: np.ndarray, 
+    confs: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Consolidate overlapping detections of the same class using graph-based merging.
+    
+    Groups overlapping boxes using connected components and merges each group
+    into a single minimum area rectangle.
+    
+    Args:
+        boxes: Array of bounding boxes (N x 4 x 2)
+        classes: Array of class IDs (N,)
+        confs: Array of confidence scores (N,)
+        
+    Returns:
+        Tuple of (merged_boxes, merged_classes, merged_confidences)
+    """
+    if len(boxes) == 0:
+        return boxes, classes, confs
+    
+    final_boxes = []
+    final_cls = []
+    final_conf = []
+    
+    # Process each class separately
+    for cls in np.unique(classes):
+        idxs = np.where(classes == cls)[0]
+        cls_boxes = boxes[idxs]
+        cls_confs = confs[idxs]
+        
+        n = len(idxs)
+        
+        # Build adjacency list for overlapping boxes
+        adj = [[] for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                if should_merge(cls_boxes[i], cls_boxes[j]):
+                    adj[i].append(j)
+                    adj[j].append(i)
+        
+        # Find connected components using DFS
+        visited = [False] * n
+        
+        for i in range(n):
+            if not visited[i]:
+                # DFS to find all connected boxes
+                stack = [i]
+                visited[i] = True
+                group = []
+                
+                while stack:
+                    curr = stack.pop()
+                    group.append(curr)
+                    for neighbor in adj[curr]:
+                        if not visited[neighbor]:
+                            visited[neighbor] = True
+                            stack.append(neighbor)
+                
+                # Merge all boxes in group
+                all_pts = np.vstack(cls_boxes[group]).astype(np.float32)
+                rect = cv2.minAreaRect(all_pts)
+                merged_box = cv2.boxPoints(rect).astype(int)
+                
+                final_boxes.append(merged_box)
+                final_cls.append(cls)
+                final_conf.append(np.max(cls_confs[group]))
+    
+    return np.array(final_boxes), np.array(final_cls), np.array(final_conf)
+
+# ============================================================================
+# QUALITY METRICS CALCULATION
+# ============================================================================
+
+def calculate_laplacian_variance(img_crop: np.ndarray) -> float:
+    """
+    Calculate image sharpness using Laplacian variance.
+    
+    Higher values indicate sharper images. This metric helps assess
+    the visual quality of detected brand logos.
+    
+    Args:
+        img_crop: Cropped image region (BGR format)
+        
+    Returns:
+        Laplacian variance score (higher = sharper)
+    """
+    try:
+        if img_crop.size == 0:
+            return 0.0
+        gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
+        return cv2.Laplacian(gray, cv2.CV_64F).var()
+    except:
+        return 0.0
+
+
+def sigmoid_size_score_final(ratio: float) -> float:
+    """
+    Calculate size score using adjusted sigmoid function.
+    
+    This function is calibrated to be less punishing for small logos (like those
+    on baskets) while still penalizing tiny, nearly invisible logos.
+    
+    Sigmoid parameters:
+    - k (slope): 120 (gentler than standard 150)
+    - x0 (center): 0.008 (0.8% of screen area)
+    
+    Args:
+        ratio: Logo area as fraction of total screen area (0-1)
+        
+    Returns:
+        Size score from 0 to 1
+    """
+    k = 120      # Gentler slope
+    x0 = 0.008   # Center at 0.8%
+    
+    score = 1 / (1 + np.exp(-k * (ratio - x0)))
+    
+    # Absolute noise threshold
+    if ratio < 0.0015:  # < 0.15% considered invisible
+        return 0.0
+        
+    return score
+
+
+def calculate_weighted_share_of_voice(
+    target_area: float,
+    target_center: np.ndarray,
+    all_boxes_data: List[Dict],
+    diag_px: float
+) -> float:
+    """
+    Calculate weighted Share of Voice considering spatial crowding effect.
+    
+    Competing logos only count if they're nearby (within 10% of screen diagonal).
+    Uses Gaussian weighting to model attention competition.
+    
+    Args:
+        target_area: Area of target logo in pixels
+        target_center: Center point of target logo (x, y)
+        all_boxes_data: List of dicts with 'area' and 'center' for all logos
+        diag_px: Screen diagonal in pixels (for normalization)
+        
+    Returns:
+        Weighted share of voice score (0-1), square-root transformed
+    """
+    weighted_competitor_area = 0.0
+    sigma_crowd = 0.10  # 10% of screen = radius of influence
+    
+    for box_data in all_boxes_data:
+        dist_px = np.linalg.norm(target_center - box_data['center'])
+        
+        # Skip self (distance < 1px)
+        if dist_px < 1.0:
+            continue
+            
+        dist_norm = dist_px / diag_px
+        
+        # Gaussian weight
+        weight = np.exp(-(dist_norm**2) / (2 * sigma_crowd**2))
+        
+        weighted_competitor_area += (box_data['area'] * weight)
+    
+    total_effective_area = target_area + weighted_competitor_area
+    
+    if total_effective_area == 0:
+        return 0.0
+    
+    sov = target_area / total_effective_area
+    
+    # Square root smoothing
+    return np.sqrt(sov)
+
+
+def calculate_final_scores(
+    logo_box: np.ndarray,
+    logo_center: np.ndarray,
+    focal_point: np.ndarray,
+    diag_px: float,
+    total_area_px: float,
+    all_boxes_data: List[Dict]
+) -> Dict[str, float]:
+    """
+    Calculate comprehensive quality scores for a detected logo.
+    
+    Computes the QI (Quality Index) Score as the product of three components:
+    1. Attention (distance from focal point - usually basketball)
+    2. Size (logo area relative to screen)
+    3. Share of Voice (logo prominence relative to nearby competitors)
+    
+    Args:
+        logo_box: Oriented bounding box of logo (4x2 array)
+        logo_center: Center point of logo (x, y)
+        focal_point: Point of visual attention (usually basketball position)
+        diag_px: Screen diagonal in pixels
+        total_area_px: Total screen area in pixels
+        all_boxes_data: Data for all detected logos (for SoV calculation)
+        
+    Returns:
+        Dictionary containing:
+        - qi_score: Final quality index (product of components)
+        - s_attn: Attention score (Gaussian based on distance)
+        - s_size: Size score (sigmoid based on area)
+        - s_sov: Share of voice score (weighted competition)
+        - dist_raw_pct: Raw distance to focal point (percentage of diagonal)
+    """
+    # Raw measurements
+    dist_px = np.linalg.norm(logo_center - focal_point)
+    dist_raw_pct = dist_px / diag_px 
+    area = cv2.contourArea(logo_box)
+    ratio = area / total_area_px
+
+    # 1. Attention Score (Gaussian with sigma=0.20 for conservative foveal model)
+    s_attn = np.exp(-(dist_raw_pct**2) / (2 * 0.20**2))
+    
+    # 2. Size Score (Adjusted sigmoid for small logos)
+    s_size = sigmoid_size_score_final(ratio)
+    
+    # 3. Clutter Score (Weighted Share of Voice)
+    s_sov = calculate_weighted_share_of_voice(
+        area, logo_center, all_boxes_data, diag_px
+    )
+    
+    # Final QI Score (product of components)
+    qi = s_attn * s_size * s_sov
+
+    return {
+        'qi_score': min(qi, 1.0),
+        's_attn': s_attn,
+        's_size': s_size,
+        's_sov': s_sov,
+        'dist_raw_pct': dist_raw_pct
     }
 
+# ============================================================================
+# VIDEO DOWNLOAD WORKER
+# ============================================================================
+
+def download_worker(
+    task_queue: queue.Queue,
+    ready_queue: queue.Queue,
+    worker_id: int
+) -> None:
+    """
+    Worker thread for downloading videos from URLs.
+    
+    Continuously processes download tasks from the queue, downloads videos
+    using yt-dlp, and places them in the ready queue for processing.
+    Implements retry logic and timeout handling.
+    
+    Args:
+        task_queue: Queue containing download tasks
+        ready_queue: Queue for completed downloads
+        worker_id: Unique identifier for this worker thread
+    """
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    
+    # yt-dlp configuration
+    ydl_opts = {
+        'format': 'best[height<=720]/best',
+        'quiet': True,
+        'no_warnings': True,
+        'cookiesfrombrowser': ('firefox',),
+        'socket_timeout': DOWNLOAD_TIMEOUT,
+        'retries': MAX_DOWNLOAD_RETRIES
+    }
+    
     while True:
         try:
             task = task_queue.get(timeout=1)
-        except queue.Empty: continue
+        except queue.Empty:
+            continue
+        
+        # Poison pill to stop worker
         if task is None:
             ready_queue.put(None)
             break
-            
-        output_path = os.path.join(TEMP_DIR, f"{task['video_id']}.mp4")
+        
+        video_id = task.get('video_id', 'unknown')
+        output_path = os.path.join(TEMP_DIR, f"{video_id}.mp4")
+        
+        # Skip if already downloaded
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            logger.debug(f"Video {video_id} already exists, skipping download")
+            ready_queue.put({'path': output_path, 'meta': task})
+            task_queue.task_done()
+            continue
+        
+        # Attempt download with retry logic
         current_opts = ydl_opts.copy()
         current_opts['outtmpl'] = output_path
         
-        try:
-            if not os.path.exists(output_path):
+        success = False
+        last_error = None
+        
+        for attempt in range(MAX_DOWNLOAD_RETRIES):
+            try:
                 with yt_dlp.YoutubeDL(current_opts) as ydl:
                     ydl.download([task['url']])
-            ready_queue.put({'path': output_path, 'meta': task})
-        except Exception:
-            pass # Ignore download errors to continue
-        finally:
-            task_queue.task_done()
+                
+                # Verify download
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    ready_queue.put({'path': output_path, 'meta': task})
+                    success = True
+                    logger.debug(f"Successfully downloaded video {video_id}")
+                    break
+                else:
+                    raise Exception("Downloaded file is empty or corrupted")
+                    
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Download attempt {attempt + 1}/{MAX_DOWNLOAD_RETRIES} "
+                    f"failed for video {video_id}: {str(e)}"
+                )
+                time.sleep(2 ** attempt)  # Exponential backoff
+        
+        if not success:
+            logger.error(
+                f"Failed to download video {video_id} after "
+                f"{MAX_DOWNLOAD_RETRIES} attempts. Last error: {last_error}"
+            )
+            # Put placeholder in ready queue to maintain count
+            ready_queue.put({'path': None, 'meta': task, 'error': str(last_error)})
+        
+        task_queue.task_done()
 
 # ============================================================================
-# CORE: ANALYZER WITH "SMART REFERENCE" LOGIC
+# VIDEO PROCESSING
 # ============================================================================
 
-def process_video_batched(video_path, model):
+def process_video_batched(
+    video_path: str,
+    model: YOLO
+) -> Tuple[Dict, Dict]:
+    """
+    Process a video file to detect and analyze brand logo exposure.
+    
+    Performs batched inference on video frames, tracks basketball position,
+    consolidates detections, and calculates quality metrics for each brand.
+    
+    Args:
+        video_path: Path to video file
+        model: Loaded YOLO model for detection
+        
+    Returns:
+        Tuple of (brand_metrics_dict, video_metadata_dict)
+        Returns empty dicts if video cannot be opened
+    """
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened(): return {}, {}
+    
+    if not cap.isOpened():
+        logger.error(f"Cannot open video: {video_path}")
+        return {}, {}
 
+    # Extract video metadata
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    diag_px = np.sqrt(width**2 + height**2)
+    total_area_px = width * height
     skip_interval = max(1, round(fps / TARGET_FPS))
     
-    video_meta = {'fps': fps, 'skip_interval': skip_interval, 'width': width, 'height': height}
+    video_meta = {
+        'fps': fps,
+        'skip_interval': skip_interval,
+        'width': width,
+        'height': height,
+        'total_frames': total_frames
+    }
     
-    # --- MEMORY STATE (SMART REFERENCE) ---
-    # Initialize ball state for this video
+    # Ball tracking state
     ball_state = {
-        'last_center': None,  # Coordinates (x, y)
-        'lost_count': 9999,   # Number of frames since loss
+        'last_center': None,
+        'lost_count': 9999,
         'image_center': np.array([width / 2, height / 2], dtype=np.float32)
     }
 
     results = {}
     batch_frames = []
     frame_idx = 0
-
-    while True:
-        if frame_idx % skip_interval == 0:
-            success, frame = cap.read()
-            if not success: break
-            batch_frames.append(frame)
-        else:
-            if not cap.grab(): break
+    
+    try:
+        while True:
+            # Read frame if it's a target frame
+            if frame_idx % skip_interval == 0:
+                success, frame = cap.read()
+                if not success:
+                    break
+                batch_frames.append(frame)
+            else:
+                # Skip frame without decoding
+                if not cap.grab():
+                    break
+            
+            # Process batch when full
+            if len(batch_frames) >= BATCH_SIZE:
+                _process_batch(
+                    batch_frames, model, results, ball_state,
+                    diag_px, total_area_px
+                )
+                batch_frames = []
+            
+            frame_idx += 1
         
-        if len(batch_frames) >= BATCH_SIZE:
-            # Pass ball_state so it gets updated frame by frame
-            _process_batch(batch_frames, model, results, ball_state)
-            batch_frames = []
-        
-        frame_idx += 1
-
-    if batch_frames:
-        _process_batch(batch_frames, model, results, ball_state)
-
-    cap.release()
+        # Process remaining frames
+        if batch_frames:
+            _process_batch(
+                batch_frames, model, results, ball_state,
+                diag_px, total_area_px
+            )
+            
+    except Exception as e:
+        logger.error(f"Error processing video {video_path}: {e}")
+    finally:
+        cap.release()
+    
     return results, video_meta
 
-def _process_batch(frames, model, results, ball_state):
+
+def _process_batch(
+    frames: List[np.ndarray],
+    model: YOLO,
+    results: Dict,
+    ball_state: Dict,
+    diag_px: float,
+    total_area_px: float
+) -> None:
     """
-    Process a batch but apply sequential logic for ball memory.
-    """
-    with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
-        batch_results = model(frames, imgsz=INPUT_SIZE, conf=CONF_THRESH, verbose=False, half=True)
+    Process a batch of frames through the detection model.
     
-    # Iterate SEQUENTIALLY over batch results to maintain temporal coherence
-    for res in batch_results:
-        
-        img_h, img_w = res.orig_shape
-        img_diag = np.sqrt(img_w**2 + img_h**2)
-        img_area = img_w * img_h
-
-        # Retrieve YOLO data
-        if res.obb is None: 
-            # If no detection, just increment loss counter
+    Internal function called by process_video_batched. Handles detection,
+    consolidation, focal point tracking, and metric accumulation.
+    
+    Args:
+        frames: List of frame images (BGR format)
+        model: YOLO detection model
+        results: Dictionary to accumulate brand metrics (modified in-place)
+        ball_state: Dictionary tracking basketball position (modified in-place)
+        diag_px: Screen diagonal in pixels
+        total_area_px: Total screen area in pixels
+    """
+    # Run inference with automatic mixed precision
+    with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
+        batch_results = model(
+            frames,
+            imgsz=INPUT_SIZE,
+            conf=CONF_THRESH,
+            verbose=False,
+            half=True
+        )
+    
+    for i, res in enumerate(batch_results):
+        # Skip if no detections
+        if res.obb is None:
             ball_state['lost_count'] += 1
-            # No logos detected, so nothing to calculate for this frame
             continue
-
-        classes = res.obb.cls.cpu().numpy().astype(int)
-        boxes = res.obb.xyxyxyxy.cpu().numpy()
-        confs = res.obb.conf.cpu().numpy()
         
-        # Centers of all boxes
+        # Extract raw detections
+        raw_classes = res.obb.cls.cpu().numpy().astype(int)
+        raw_boxes = res.obb.xyxyxyxy.cpu().numpy().astype(int)
+        raw_confs = res.obb.conf.cpu().numpy()
+        
+        # Consolidate overlapping detections
+        boxes, classes, confs = consolidate_detections(
+            raw_boxes, raw_classes, raw_confs
+        )
+        
+        if len(boxes) == 0:
+            ball_state['lost_count'] += 1
+            continue
+        
+        # Calculate box centers
         box_centers = boxes.mean(axis=1).astype(np.float32)
-        
-        # --- 1. SMART BALL LOGIC (Inspired by provided code) ---
-        
-        # Find index of best ball (max confidence)
-        ball_indices = [i for i, c in enumerate(classes) if model.names[c] == BALL_CLASS_NAME]
+
+        # Determine focal point (basketball position with persistence)
+        ball_indices = [
+            idx for idx, c in enumerate(classes)
+            if model.names[c] == BALL_CLASS_NAME
+        ]
         
         current_ball_center = None
         if ball_indices:
+            # Use highest confidence ball detection
             best_idx = ball_indices[np.argmax(confs[ball_indices])]
             current_ball_center = box_centers[best_idx]
-
-        # Determine Reference Point (REF)
-        ref_point = None
         
+        # Focal point logic with persistence
         if current_ball_center is not None:
-            # CASE 1: Ball visible -> It's the reference
-            ref_point = current_ball_center
+            focal_point = current_ball_center
             ball_state['last_center'] = current_ball_center
             ball_state['lost_count'] = 0
-            
-        elif ball_state['last_center'] is not None and ball_state['lost_count'] < PERSISTENCE_WINDOW:
-            # CASE 2: Ball recently lost -> Use memory (Ghost Point)
-            ref_point = ball_state['last_center']
+        elif (ball_state['last_center'] is not None and
+              ball_state['lost_count'] < PERSISTENCE_WINDOW):
+            focal_point = ball_state['last_center']
             ball_state['lost_count'] += 1
-            
         else:
-            # CASE 3: Ball lost for long time -> Use image center
-            ref_point = ball_state['image_center']
+            focal_point = ball_state['image_center']
             ball_state['lost_count'] += 1
 
-        # --- 2. STATISTICS CALCULATION ---
+        # Prepare neighbor data for Share of Voice calculation
+        all_boxes_data = []
+        for k, b in enumerate(boxes):
+            if model.names[classes[k]] != BALL_CLASS_NAME:
+                all_boxes_data.append({
+                    'area': cv2.contourArea(b),
+                    'center': box_centers[k]
+                })
 
-        areas_px = np.array([cv2.contourArea(box) for box in boxes])
-        
+        # Track which brands detected in this frame
         detected_in_this_frame = set()
+        current_frame_img = frames[i]
 
-        for i, cls_id in enumerate(classes):
+        # Process each detection
+        for j, cls_id in enumerate(classes):
             name = model.names[cls_id]
             
+            # Skip basketball detections
             if name == BALL_CLASS_NAME:
                 continue
             
+            # Initialize brand entry if needed
             if name not in results:
                 results[name] = {
                     'frames': 0,
-                    'norm_area_acc': 0.0,
                     'detections': 0,
-                    'norm_dist_acc': 0.0,
-                    'dist_samples': 0  # Counter for distance average
+                    'qi_score_acc': 0.0, 'qi_score_sq': 0.0,
+                    'size_score_acc': 0.0, 'size_score_sq': 0.0,
+                    'sov_weighted_acc': 0.0, 'sov_weighted_sq': 0.0,
+                    'dist_score_acc': 0.0, 'dist_score_sq': 0.0,
+                    'conf_acc': 0.0, 'conf_sq': 0.0,
+                    'laplacian_acc': 0.0, 'laplacian_sq': 0.0,
+                    'dist_raw_pct_acc': 0.0, 'dist_raw_pct_sq': 0.0,
+                    'area_pct_acc': 0.0, 'area_pct_sq': 0.0
                 }
             
-            # Area (Always calculated)
-            results[name]['norm_area_acc'] += float(areas_px[i] / img_area)
+            # Calculate quality scores
+            scores = calculate_final_scores(
+                boxes[j], box_centers[j], focal_point,
+                diag_px, total_area_px, all_boxes_data
+            )
+            
+            # Calculate sharpness (Laplacian variance)
+            x_coords = boxes[j][:, 0]
+            y_coords = boxes[j][:, 1]
+            x_min = max(0, int(min(x_coords)))
+            x_max = min(current_frame_img.shape[1], int(max(x_coords)))
+            y_min = max(0, int(min(y_coords)))
+            y_max = min(current_frame_img.shape[0], int(max(y_coords)))
+            
+            laplacian_val = 0.0
+            if x_max > x_min and y_max > y_min:
+                crop = current_frame_img[y_min:y_max, x_min:x_max]
+                laplacian_val = calculate_laplacian_variance(crop)
+
+            # Calculate percentage metrics
+            area_val_pct = (cv2.contourArea(boxes[j]) / total_area_px) * 100
+            dist_raw_val_pct = scores['dist_raw_pct'] * 100
+
+            # Accumulate statistics (for mean and std calculation)
+            def update(key: str, val: float) -> None:
+                results[name][f'{key}_acc'] += val
+                results[name][f'{key}_sq'] += (val ** 2)
+
+            # Scientific metrics
+            update('qi_score', scores['qi_score'])
+            update('size_score', scores['s_size'])
+            update('sov_weighted', scores['s_sov'])
+            update('dist_score', scores['s_attn'])
+            
+            # Raw metrics
+            update('conf', confs[j])
+            update('laplacian', laplacian_val)
+            update('dist_raw_pct', dist_raw_val_pct)
+            update('area_pct', area_val_pct)
+            
             results[name]['detections'] += 1
-            
-            # Distance (Calculated relative to "ref_point" determined above)
-            # Since we ALWAYS have a ref_point (Ball, Memory, or Center), we always calculate.
-            dist_px = np.linalg.norm(box_centers[i] - ref_point)
-            norm_dist = dist_px / img_diag
-            
-            results[name]['norm_dist_acc'] += float(norm_dist)
-            results[name]['dist_samples'] += 1
-            
             detected_in_this_frame.add(name)
         
+        # Count frames for each detected brand
         for name in detected_in_this_frame:
             results[name]['frames'] += 1
 
 # ============================================================================
-# MAIN
+# MAIN PROCESSING PIPELINE
 # ============================================================================
 
-def main():
-    start_time = time.time()
+def main() -> None:
+    """
+    Main entry point for the brand exposure analysis pipeline.
     
-    # Setup
+    Orchestrates the complete workflow:
+    1. Initialize files and load model
+    2. Load input data and check for existing results
+    3. Start download worker threads
+    4. Process videos in batches
+    5. Save results incrementally
+    
+    The pipeline is fault-tolerant and will continue processing even if
+    individual videos fail to download or process.
+    """
+    # Initialize environment
+    initialize_files()
+    logger.info("=== Starting Brand Exposure Analysis ===")
+    
+    # Load YOLO model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Loading on {device.upper()}...")
+    logger.info(f"Loading model on {device.upper()}...")
+    
     try:
         model = YOLO(MODEL_PATH)
         model.to(device)
+        logger.info("Model loaded successfully")
     except Exception as e:
-        print(f" Model error: {e}")
+        logger.critical(f"Failed to load model: {e}")
         return
 
-    # Load CSV
-    existing_df, processed_ids = load_existing_results(OUTPUT_CSV)
+    # Load existing results
+    existing_df, processed = load_existing_results(OUTPUT_CSV)
+    
+    # Load input tasks
     try:
         df = pd.read_csv(INPUT_CSV)
-        video_tasks = [t for t in df.to_dict('records') if str(t['video_id']) not in processed_ids]
-    except FileNotFoundError: return
-
-    if not video_tasks:
-        print("✓ Everything already processed.")
+        df['video_id'] = df['video_id'].astype(str)
+        tasks = [
+            task for task in df.to_dict('records')
+            if task['video_id'] not in processed
+        ]
+    except Exception as e:
+        logger.error(f"Error loading input CSV: {e}")
         return
 
-    # Thread Pipeline
+    if not tasks:
+        logger.info("No new videos to process.")
+        return
+
+    # Initialize queues
     task_queue = queue.Queue()
     ready_queue = queue.Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     
-    downloaders = []
+    # Start download worker threads
+    logger.info(f"Starting {NUM_DOWNLOADERS} download worker(s)...")
     for i in range(NUM_DOWNLOADERS):
-        t = threading.Thread(target=download_worker, args=(task_queue, ready_queue, i), daemon=True)
-        t.start()
-        downloaders.append(t)
+        threading.Thread(
+            target=download_worker,
+            args=(task_queue, ready_queue, i),
+            daemon=True,
+            name=f"Downloader-{i}"
+        ).start()
+    
+    # Enqueue all tasks
+    for task in tasks:
+        task_queue.put(task)
+    
+    # Send poison pills to stop workers
+    for _ in range(NUM_DOWNLOADERS):
+        task_queue.put(None)
 
-    for task in video_tasks: task_queue.put(task)
-    for _ in range(NUM_DOWNLOADERS): task_queue.put(None)
-
-    # Processing loop
+    # Process videos
     pending_results = []
     processed_count = 0
+    failed_count = 0
+    active_workers = NUM_DOWNLOADERS
     
-    print(f"\nProcessing {len(video_tasks)} videos...")
-    print(f"Distance Strategy: Ball -> Memory ({PERSISTENCE_WINDOW} frames) -> Center")
-    print("="*60)
-
-    with tqdm(total=len(video_tasks), unit="vid") as pbar:
-        active_downloaders = NUM_DOWNLOADERS
-        
-        while processed_count < len(video_tasks):
+    logger.info(f"Processing {len(tasks)} videos...")
+    
+    with tqdm(total=len(tasks), desc="Processing videos") as pbar:
+        while processed_count < len(tasks):
             try:
-                item = ready_queue.get(timeout=2)
+                item = ready_queue.get(timeout=5)
             except queue.Empty:
-                if active_downloaders == 0: break
+                # Check if all workers have stopped
+                if active_workers == 0:
+                    break
                 continue
-
+            
+            # Check for worker shutdown signal
             if item is None:
-                active_downloaders -= 1
+                active_workers -= 1
+                continue
+            
+            # Check for download error
+            if item.get('path') is None or item.get('error'):
+                video_id = item['meta'].get('video_id', 'unknown')
+                logger.warning(
+                    f"Skipping video {video_id} due to download failure: "
+                    f"{item.get('error', 'Unknown error')}"
+                )
+                failed_count += 1
+                processed_count += 1
+                pbar.update(1)
                 continue
 
-            path = item['path']
-            meta = item['meta']
+            # Process video
+            video_path = item['path']
+            video_id = item['meta'].get('video_id', 'unknown')
             
             try:
-                metrics, vid_meta = process_video_batched(path, model)
+                # Set processing timeout
+                metrics, v_meta = process_video_batched(video_path, model)
                 
-                for class_name, stats in metrics.items():
-                    # Final calculations
-                    real_exposure = stats['frames'] * (vid_meta['skip_interval'] / vid_meta['fps']) if vid_meta['fps'] else 0
+                # Generate results for each detected brand
+                for brand, stats in metrics.items():
+                    # Calculate exposure time
+                    exp_sec = (
+                        stats['frames'] * (v_meta['skip_interval'] / v_meta['fps'])
+                        if v_meta['fps'] else 0
+                    )
                     
-                    avg_area = 0
-                    if stats['detections'] > 0:
-                        avg_area = (stats['norm_area_acc'] / stats['detections']) * 100
+                    d = stats['detections']
                     
-                    # Distance average (now calculated on almost all frames)
-                    avg_dist = 0
-                    if stats['dist_samples'] > 0:
-                        avg_dist = (stats['norm_dist_acc'] / stats['dist_samples']) * 100
+                    # Calculate mean and std for all metrics
+                    def ms(key: str) -> Tuple[float, float]:
+                        return calculate_stats(
+                            stats[f'{key}_acc'],
+                            stats[f'{key}_sq'],
+                            d
+                        )
 
+                    # Scientific metrics
+                    qi_m, qi_s = ms('qi_score')
+                    sz_m, sz_s = ms('size_score')
+                    sov_m, sov_s = ms('sov_weighted')
+                    ds_m, ds_s = ms('dist_score')
+                    
+                    # Raw metrics
+                    cf_m, cf_s = ms('conf')
+                    lp_m, lp_s = ms('laplacian')
+                    dr_m, dr_s = ms('dist_raw_pct')
+                    ar_m, ar_s = ms('area_pct')
+
+                    # Append result
                     pending_results.append({
-                        'game_id': meta.get('game_id'),
-                        'video_id': meta.get('video_id'),
-                        'exposure_zone': class_name,
-                        'exposure_time_seconds': round(real_exposure, 2),
-                        'avg_area_pct': round(avg_area, 4),
-                        'avg_dist_ref_pct': round(avg_dist, 2), # Renamed for clarity
-                        'video_url': meta.get('url')
+                        'game_id': item['meta'].get('game_id'),
+                        'video_id': item['meta'].get('video_id'),
+                        'brand_name': brand,
+                        'exposure_seconds': round(exp_sec, 2),
+                        'total_detections': d,
+                        
+                        'qi_score_avg': round(qi_m, 4),
+                        'qi_score_std': round(qi_s, 4),
+                        'size_score_avg': round(sz_m, 4),
+                        'size_score_std': round(sz_s, 4),
+                        'sov_weighted_avg': round(sov_m, 4),
+                        'sov_weighted_std': round(sov_s, 4),
+                        'dist_score_avg': round(ds_m, 4),
+                        'dist_score_std': round(ds_s, 4),
+                        
+                        'conf_avg': round(cf_m, 4),
+                        'conf_std': round(cf_s, 4),
+                        'laplacian_avg': round(lp_m, 2),
+                        'laplacian_std': round(lp_s, 2),
+                        'dist_raw_pct_avg': round(dr_m, 2),
+                        'dist_raw_pct_std': round(dr_s, 2),
+                        'area_pct_avg': round(ar_m, 3),
+                        'area_pct_std': round(ar_s, 3),
+                        
+                        'video_url': item['meta'].get('url')
                     })
-
+                    
+                logger.info(
+                    f"Successfully processed video {video_id}: "
+                    f"{len(metrics)} brands detected"
+                )
+                    
             except Exception as e:
-                print(f"Error {meta.get('video_id')}: {e}")
+                logger.error(f"Error processing video {video_id}: {e}", exc_info=True)
+                failed_count += 1
+                
             finally:
-                if os.path.exists(path):
-                    try: os.remove(path)
-                    except: pass
+                # Clean up temporary video file
+                if os.path.exists(video_path):
+                    try:
+                        os.remove(video_path)
+                    except Exception as e:
+                        logger.warning(f"Could not delete temp file {video_path}: {e}")
+                
                 processed_count += 1
                 pbar.update(1)
                 
+                # Save incrementally
                 if processed_count % SAVE_EVERY == 0:
                     if save_results_incremental(pending_results, OUTPUT_CSV):
+                        logger.info(f"Saved {len(pending_results)} results")
                         pending_results = []
-
+    
+    # Save any remaining results
     if pending_results:
         save_results_incremental(pending_results, OUTPUT_CSV)
+        logger.info(f"Saved final {len(pending_results)} results")
+    
+    # Final summary
+    logger.info("=== Processing Complete ===")
+    logger.info(f"Successfully processed: {processed_count - failed_count}/{len(tasks)}")
+    logger.info(f"Failed: {failed_count}/{len(tasks)}")
+    logger.info(f"Results saved to: {OUTPUT_CSV}")
 
-    print("\n✓ COMPLETED")
 
 if __name__ == "__main__":
     main()
