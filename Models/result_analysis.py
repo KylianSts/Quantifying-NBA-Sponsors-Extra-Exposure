@@ -25,8 +25,8 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-VERSION = "modelisation_v10"
-SUB_MODEL = "yolo11s-obb_fine_tuned_v10_1280"
+VERSION = "modelisation_v11"
+SUB_MODEL = "yolo11s-obb_fine_tuned_v11_1280"
 
 MODEL_WEIGHTS = f'Models/models_results/{VERSION}/{SUB_MODEL}/weights/best.pt'
 IMAGES_FOLDER = 'Data/images/test_images_quality'

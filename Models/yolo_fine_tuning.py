@@ -39,7 +39,7 @@ DATASET_YAML_PATH = 'Data/yolo_dataset/nba_sponsor_dataset.yaml'
 MODEL_TO_USE = 'Models/yolo/yolo11s-obb.pt'  
 
 # Training hyperparameters
-EPOCHS = 50  # Number of training epochs 
+EPOCHS = 100  # Number of training epochs 
 IMAGE_SIZE = 1280  # Input image size in pixels
 BATCH_SIZE = 4  # Number of images per batch
 
