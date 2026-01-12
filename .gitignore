@@ -19,6 +19,7 @@ Models\models_results\modelisation_v6\yolov8l-obb_fine_tuned_v6\weights
 Models/models_results/modelisation_v10/evaluation/errors
 Models/models_results/modelisation_v10/evaluation/interpretability
 Models/models_results/modelisation_v10/evaluation/corrected_hallucinations
+Models/models_results/modelisation_v10/evaluation/merged_detections
 
 # Other 
 Data/exposure_and_game_info/exposure_result.log
