@@ -1,6 +1,6 @@
 """
-Brand Exposure Analysis System for Basketball Videos
-=====================================================
+Brand Exposure Analysis System for Basketball Videos (V3 + Media Valuation)
+==========================================================================
 
 This system processes basketball game highlight videos to detect and measure
 brand logo exposure using computer vision and deep learning techniques.
@@ -9,7 +9,8 @@ Key Features:
 - Automated video downloading from URLs
 - YOLO-based object detection (OBB - Oriented Bounding Boxes)
 - Multi-threaded video processing
-- Advanced quality scoring (QI Score) combining attention, size, and clutter
+- Advanced quality scoring v combining attention, size, clutter, and legibility
+- Financial Valuation: Calculates Media Value based on View Count and QI
 - Incremental CSV output with fault tolerance
 """
 
@@ -35,8 +36,8 @@ from typing import Dict, List, Tuple, Optional, Set
 
 # Model and file paths
 MODEL_PATH = "Models/models_results/modelisation_v10/yolo11s-obb_fine_tuned_v10_1280/weights/best.pt"
-INPUT_CSV = "Data/urls/game_highlight_urls_2024_25.csv"
-OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results_2024_25.csv"
+INPUT_CSV = "Data/urls/game_highlight_urls_2025_26.csv"
+OUTPUT_CSV = "Data/exposure_and_game_info/exposure_results_2025_26_test.csv"
 TEMP_DIR = "Data/temp_videos"
 
 # Detection parameters
@@ -44,6 +45,10 @@ CONF_THRESH = 0.6              # Minimum confidence threshold for detections
 TARGET_FPS = 5                 # Target frame rate for processing
 BALL_CLASS_NAME = "basketball" # Class name for basketball detection
 INPUT_SIZE = 1024              # Input size for YOLO model
+
+# Valuation parameters
+CPV_REF = 0.00033              # Cost Per View reference (constant)
+FRAME_DURATION = 1.0 / TARGET_FPS # Duration of one frame (0.2s)
 
 # Tracking and fusion parameters
 PERSISTENCE_WINDOW = TARGET_FPS * 1.5  # Frames to persist ball location
@@ -54,7 +59,7 @@ MERGE_CONTAINMENT_THRESH = 0.50        # Containment threshold for merging
 BATCH_SIZE = 32           # Number of frames to process in batch
 NUM_DOWNLOADERS = 3       # Number of concurrent download threads
 DOWNLOAD_QUEUE_SIZE = 6   # Maximum videos in download queue
-SAVE_EVERY = 10            # Save results every N videos
+SAVE_EVERY = 5             # Save results every N videos
 
 # Timeout parameters
 DOWNLOAD_TIMEOUT = 600      # Timeout for video download (seconds)
@@ -84,14 +89,6 @@ logger = logging.getLogger(__name__)
 def initialize_files() -> None:
     """
     Initialize required files and directories for the analysis pipeline.
-    
-    Creates:
-    - Input/output directories if they don't exist
-    - Template CSV files with proper column headers
-    - Validates model file existence
-    
-    Raises:
-        SystemExit: If model file is not found or input CSV cannot be created
     """
     logger.info("Checking and creating required files...")
     
@@ -108,7 +105,8 @@ def initialize_files() -> None:
     # Check/create input CSV
     if not os.path.exists(INPUT_CSV):
         logger.warning(f"Input file not found: {INPUT_CSV}")
-        df_template = pd.DataFrame(columns=['video_id', 'url', 'game_id'])
+        # Added view_count to template
+        df_template = pd.DataFrame(columns=['video_id', 'url', 'game_id', 'view_count'])
         df_template.to_csv(INPUT_CSV, index=False)
         logger.info(f"Template file created. Please populate it with video data.")
         sys.exit(0)
@@ -120,17 +118,21 @@ def initialize_files() -> None:
             'game_id', 'video_id', 'exposure_zone', 
             'exposure_seconds', 'total_detections',
             
-            # Scientific metrics (QI Score V2)
+            # Financial Metric
+            'total_media_value',                        # NEW: Sum of V_i,t
+            
+            # Scientific metrics (QI Score V3)
             'qi_score_avg', 'qi_score_std',
             
             # QI Score components
             'size_score_avg', 'size_score_std',         # Sigmoid size score
             'sov_weighted_avg', 'sov_weighted_std',     # Weighted share of voice
             'dist_score_avg', 'dist_score_std',         # Gaussian attention score
+            'legi_score_avg', 'legi_score_std',         # Legibility score
 
             # Raw metrics for context
             'conf_avg', 'conf_std',                     # AI confidence
-            'laplacian_avg', 'laplacian_std',           # Sharpness
+            'laplacian_avg', 'laplacian_std',           # Sharpness raw
             'dist_raw_pct_avg', 'dist_raw_pct_std',     # Raw distance to ball (%)
             'area_pct_avg', 'area_pct_std',             # Raw size (% of screen)
             
@@ -150,19 +152,7 @@ def initialize_files() -> None:
 # ============================================================================
 
 def calculate_stats(sum_val: float, sum_sq_val: float, n: int) -> Tuple[float, float]:
-    """
-    Calculate mean and standard deviation from accumulated statistics.
-    
-    Uses Welford's online algorithm for numerical stability.
-    
-    Args:
-        sum_val: Sum of all values
-        sum_sq_val: Sum of squared values
-        n: Number of samples
-        
-    Returns:
-        Tuple of (mean, standard_deviation)
-    """
+    """Calculate mean and standard deviation from accumulated statistics."""
     if n == 0:
         return 0.0, 0.0
     
@@ -174,15 +164,7 @@ def calculate_stats(sum_val: float, sum_sq_val: float, n: int) -> Tuple[float, f
 
 
 def load_existing_results(output_path: str) -> Tuple[pd.DataFrame, Set[str]]:
-    """
-    Load previously processed results to avoid reprocessing.
-    
-    Args:
-        output_path: Path to the output CSV file
-        
-    Returns:
-        Tuple of (DataFrame of existing results, Set of processed video IDs)
-    """
+    """Load previously processed results to avoid reprocessing."""
     if os.path.exists(output_path):
         try:
             df = pd.read_csv(output_path)
@@ -200,16 +182,7 @@ def load_existing_results(output_path: str) -> Tuple[pd.DataFrame, Set[str]]:
 save_lock = threading.Lock()
 
 def save_results_incremental(new_results: List[Dict], output_path: str) -> bool:
-    """
-    Save results incrementally to CSV file in a thread-safe manner.
-    
-    Args:
-        new_results: List of result dictionaries to append
-        output_path: Path to output CSV file
-        
-    Returns:
-        True if save was successful, False otherwise
-    """
+    """Save results incrementally to CSV file in a thread-safe manner."""
     if not new_results:
         return True
         
@@ -232,16 +205,7 @@ def save_results_incremental(new_results: List[Dict], output_path: str) -> bool:
 # ============================================================================
 
 def should_merge(box1: np.ndarray, box2: np.ndarray) -> bool:
-    """
-    Determine if two bounding boxes should be merged based on IoU and containment.
-    
-    Args:
-        box1: First bounding box as 4x2 array of corner points
-        box2: Second bounding box as 4x2 array of corner points
-        
-    Returns:
-        True if boxes should be merged, False otherwise
-    """
+    """Determine if two bounding boxes should be merged based on IoU and containment."""
     # Get bounding rectangles
     x_min1, y_min1 = box1.min(axis=0)
     x_max1, y_max1 = box1.max(axis=0)
@@ -295,20 +259,7 @@ def consolidate_detections(
     classes: np.ndarray, 
     confs: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Consolidate overlapping detections of the same class using graph-based merging.
-    
-    Groups overlapping boxes using connected components and merges each group
-    into a single minimum area rectangle.
-    
-    Args:
-        boxes: Array of bounding boxes (N x 4 x 2)
-        classes: Array of class IDs (N,)
-        confs: Array of confidence scores (N,)
-        
-    Returns:
-        Tuple of (merged_boxes, merged_classes, merged_confidences)
-    """
+    """Consolidate overlapping detections of the same class using graph-based merging."""
     if len(boxes) == 0:
         return boxes, classes, confs
     
@@ -362,21 +313,13 @@ def consolidate_detections(
     return np.array(final_boxes), np.array(final_cls), np.array(final_conf)
 
 # ============================================================================
-# QUALITY METRICS CALCULATION
+# QUALITY METRICS CALCULATION (V3)
 # ============================================================================
 
 def calculate_laplacian_variance(img_crop: np.ndarray) -> float:
     """
     Calculate image sharpness using Laplacian variance.
-    
-    Higher values indicate sharper images. This metric helps assess
-    the visual quality of detected brand logos.
-    
-    Args:
-        img_crop: Cropped image region (BGR format)
-        
-    Returns:
-        Laplacian variance score (higher = sharper)
+    Higher values indicate sharper images.
     """
     try:
         if img_crop.size == 0:
@@ -389,14 +332,11 @@ def calculate_laplacian_variance(img_crop: np.ndarray) -> float:
 
 def sigmoid_size_score_final(ratio: float) -> float:
     """
-    Calculate size score using adjusted sigmoid function.
+    Calculate size score using UPDATED parameters for V3.
     
-    This function is calibrated to be less punishing for small logos (like those
-    on baskets) while still penalizing tiny, nearly invisible logos.
-    
-    Sigmoid parameters:
-    - k (slope): 120 (gentler than standard 150)
-    - x0 (center): 0.008 (0.8% of screen area)
+    New parameters:
+    - k (slope): 100
+    - x0 (center): 0.015 (1.5% of screen area)
     
     Args:
         ratio: Logo area as fraction of total screen area (0-1)
@@ -404,8 +344,8 @@ def sigmoid_size_score_final(ratio: float) -> float:
     Returns:
         Size score from 0 to 1
     """
-    k = 120      # Gentler slope
-    x0 = 0.008   # Center at 0.8%
+    k = 100       # Modified slope for V3
+    x0 = 0.015    # Modified center (1.5%) for V3
     
     score = 1 / (1 + np.exp(-k * (ratio - x0)))
     
@@ -413,6 +353,27 @@ def sigmoid_size_score_final(ratio: float) -> float:
     if ratio < 0.0015:  # < 0.15% considered invisible
         return 0.0
         
+    return score
+
+
+def sigmoid_legibility_score(variance: float) -> float:
+    """
+    Calculate legibility score based on Laplacian variance (sharpness).
+    
+    Parameters:
+    - k (slope): 0.05
+    - x0 (center): 100.0 (Variance threshold for sharp images)
+    
+    Args:
+        variance: The raw Laplacian variance score
+        
+    Returns:
+        Legibility score from 0 to 1
+    """
+    k = 0.05
+    x0 = 100.0
+    
+    score = 1 / (1 + np.exp(-k * (variance - x0)))
     return score
 
 
@@ -424,18 +385,6 @@ def calculate_weighted_share_of_voice(
 ) -> float:
     """
     Calculate weighted Share of Voice considering spatial crowding effect.
-    
-    Competing logos only count if they're nearby (within 10% of screen diagonal).
-    Uses Gaussian weighting to model attention competition.
-    
-    Args:
-        target_area: Area of target logo in pixels
-        target_center: Center point of target logo (x, y)
-        all_boxes_data: List of dicts with 'area' and 'center' for all logos
-        diag_px: Screen diagonal in pixels (for normalization)
-        
-    Returns:
-        Weighted share of voice score (0-1), square-root transformed
     """
     weighted_competitor_area = 0.0
     sigma_crowd = 0.10  # 10% of screen = radius of influence
@@ -471,31 +420,13 @@ def calculate_final_scores(
     focal_point: np.ndarray,
     diag_px: float,
     total_area_px: float,
-    all_boxes_data: List[Dict]
+    all_boxes_data: List[Dict],
+    laplacian_val: float
 ) -> Dict[str, float]:
     """
-    Calculate comprehensive quality scores for a detected logo.
+    Calculate comprehensive quality scores including Legibility.
     
-    Computes the QI (Quality Index) Score as the product of three components:
-    1. Attention (distance from focal point - usually basketball)
-    2. Size (logo area relative to screen)
-    3. Share of Voice (logo prominence relative to nearby competitors)
-    
-    Args:
-        logo_box: Oriented bounding box of logo (4x2 array)
-        logo_center: Center point of logo (x, y)
-        focal_point: Point of visual attention (usually basketball position)
-        diag_px: Screen diagonal in pixels
-        total_area_px: Total screen area in pixels
-        all_boxes_data: Data for all detected logos (for SoV calculation)
-        
-    Returns:
-        Dictionary containing:
-        - qi_score: Final quality index (product of components)
-        - s_attn: Attention score (Gaussian based on distance)
-        - s_size: Size score (sigmoid based on area)
-        - s_sov: Share of voice score (weighted competition)
-        - dist_raw_pct: Raw distance to focal point (percentage of diagonal)
+    QI Formula V3 = Attention * Size * SoV * Legibility
     """
     # Raw measurements
     dist_px = np.linalg.norm(logo_center - focal_point)
@@ -503,25 +434,29 @@ def calculate_final_scores(
     area = cv2.contourArea(logo_box)
     ratio = area / total_area_px
 
-    # 1. Attention Score (Gaussian with sigma=0.20 for conservative foveal model)
+    # 1. Attention Score (Gaussian with sigma=0.20)
     s_attn = np.exp(-(dist_raw_pct**2) / (2 * 0.20**2))
     
-    # 2. Size Score (Adjusted sigmoid for small logos)
+    # 2. Size Score (Updated Sigmoid)
     s_size = sigmoid_size_score_final(ratio)
     
     # 3. Clutter Score (Weighted Share of Voice)
     s_sov = calculate_weighted_share_of_voice(
         area, logo_center, all_boxes_data, diag_px
     )
+
+    # 4. Legibility Score (Sigmoid on Laplacian)
+    s_legi = sigmoid_legibility_score(laplacian_val)
     
-    # Final QI Score (product of components)
-    qi = s_attn * s_size * s_sov
+    # Final QI Score (product of 4 components)
+    qi = s_attn * s_size * s_sov * s_legi
 
     return {
         'qi_score': min(qi, 1.0),
         's_attn': s_attn,
         's_size': s_size,
         's_sov': s_sov,
+        's_legi': s_legi,
         'dist_raw_pct': dist_raw_pct
     }
 
@@ -534,18 +469,7 @@ def download_worker(
     ready_queue: queue.Queue,
     worker_id: int
 ) -> None:
-    """
-    Worker thread for downloading videos from URLs.
-    
-    Continuously processes download tasks from the queue, downloads videos
-    using yt-dlp, and places them in the ready queue for processing.
-    Implements retry logic and timeout handling.
-    
-    Args:
-        task_queue: Queue containing download tasks
-        ready_queue: Queue for completed downloads
-        worker_id: Unique identifier for this worker thread
-    """
+    """Worker thread for downloading videos from URLs."""
     os.makedirs(TEMP_DIR, exist_ok=True)
     
     # yt-dlp configuration
@@ -624,22 +548,10 @@ def download_worker(
 
 def process_video_batched(
     video_path: str,
-    model: YOLO
+    model: YOLO,
+    view_count: int
 ) -> Tuple[Dict, Dict]:
-    """
-    Process a video file to detect and analyze brand logo exposure.
-    
-    Performs batched inference on video frames, tracks basketball position,
-    consolidates detections, and calculates quality metrics for each brand.
-    
-    Args:
-        video_path: Path to video file
-        model: Loaded YOLO model for detection
-        
-    Returns:
-        Tuple of (brand_metrics_dict, video_metadata_dict)
-        Returns empty dicts if video cannot be opened
-    """
+    """Process a video file to detect and analyze brand logo exposure."""
     cap = cv2.VideoCapture(video_path)
     
     if not cap.isOpened():
@@ -692,7 +604,7 @@ def process_video_batched(
             if len(batch_frames) >= BATCH_SIZE:
                 _process_batch(
                     batch_frames, model, results, ball_state,
-                    diag_px, total_area_px
+                    diag_px, total_area_px, view_count
                 )
                 batch_frames = []
             
@@ -702,7 +614,7 @@ def process_video_batched(
         if batch_frames:
             _process_batch(
                 batch_frames, model, results, ball_state,
-                diag_px, total_area_px
+                diag_px, total_area_px, view_count
             )
             
     except Exception as e:
@@ -719,22 +631,10 @@ def _process_batch(
     results: Dict,
     ball_state: Dict,
     diag_px: float,
-    total_area_px: float
+    total_area_px: float,
+    view_count: int
 ) -> None:
-    """
-    Process a batch of frames through the detection model.
-    
-    Internal function called by process_video_batched. Handles detection,
-    consolidation, focal point tracking, and metric accumulation.
-    
-    Args:
-        frames: List of frame images (BGR format)
-        model: YOLO detection model
-        results: Dictionary to accumulate brand metrics (modified in-place)
-        ball_state: Dictionary tracking basketball position (modified in-place)
-        diag_px: Screen diagonal in pixels
-        total_area_px: Total screen area in pixels
-    """
+    """Process a batch of frames through the detection model and calculate value."""
     # Run inference with automatic mixed precision
     with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
         batch_results = model(
@@ -819,23 +719,21 @@ def _process_batch(
                 results[name] = {
                     'frames': 0,
                     'detections': 0,
+                    'media_value_sum': 0.0,  # <--- Accumulator for Media Value
+                    
                     'qi_score_acc': 0.0, 'qi_score_sq': 0.0,
                     'size_score_acc': 0.0, 'size_score_sq': 0.0,
                     'sov_weighted_acc': 0.0, 'sov_weighted_sq': 0.0,
                     'dist_score_acc': 0.0, 'dist_score_sq': 0.0,
+                    'legi_score_acc': 0.0, 'legi_score_sq': 0.0,
+                    
                     'conf_acc': 0.0, 'conf_sq': 0.0,
                     'laplacian_acc': 0.0, 'laplacian_sq': 0.0,
                     'dist_raw_pct_acc': 0.0, 'dist_raw_pct_sq': 0.0,
                     'area_pct_acc': 0.0, 'area_pct_sq': 0.0
                 }
             
-            # Calculate quality scores
-            scores = calculate_final_scores(
-                boxes[j], box_centers[j], focal_point,
-                diag_px, total_area_px, all_boxes_data
-            )
-            
-            # Calculate sharpness (Laplacian variance)
+            # --- 1. CALCULATE LAPLACIAN FIRST ---
             x_coords = boxes[j][:, 0]
             y_coords = boxes[j][:, 1]
             x_min = max(0, int(min(x_coords)))
@@ -848,11 +746,23 @@ def _process_batch(
                 crop = current_frame_img[y_min:y_max, x_min:x_max]
                 laplacian_val = calculate_laplacian_variance(crop)
 
+            # --- 2. CALCULATE FINAL SCORES ---
+            scores = calculate_final_scores(
+                boxes[j], box_centers[j], focal_point,
+                diag_px, total_area_px, all_boxes_data,
+                laplacian_val
+            )
+            
+            # --- 3. CALCULATE INSTANT MEDIA VALUE ---
+            # Formula: V_{i,t} = N_{views} * CPV_{ref} * (1/5) * QI_{i,t}
+            instant_media_value = view_count * CPV_REF * FRAME_DURATION * scores['qi_score']
+            results[name]['media_value_sum'] += instant_media_value
+
             # Calculate percentage metrics
             area_val_pct = (cv2.contourArea(boxes[j]) / total_area_px) * 100
             dist_raw_val_pct = scores['dist_raw_pct'] * 100
 
-            # Accumulate statistics (for mean and std calculation)
+            # Accumulate statistics
             def update(key: str, val: float) -> None:
                 results[name][f'{key}_acc'] += val
                 results[name][f'{key}_sq'] += (val ** 2)
@@ -862,6 +772,7 @@ def _process_batch(
             update('size_score', scores['s_size'])
             update('sov_weighted', scores['s_sov'])
             update('dist_score', scores['s_attn'])
+            update('legi_score', scores['s_legi'])
             
             # Raw metrics
             update('conf', confs[j])
@@ -881,22 +792,10 @@ def _process_batch(
 # ============================================================================
 
 def main() -> None:
-    """
-    Main entry point for the brand exposure analysis pipeline.
-    
-    Orchestrates the complete workflow:
-    1. Initialize files and load model
-    2. Load input data and check for existing results
-    3. Start download worker threads
-    4. Process videos in batches
-    5. Save results incrementally
-    
-    The pipeline is fault-tolerant and will continue processing even if
-    individual videos fail to download or process.
-    """
+    """Main entry point for the brand exposure analysis pipeline."""
     # Initialize environment
     initialize_files()
-    logger.info("=== Starting Brand Exposure Analysis ===")
+    logger.info("=== Starting Brand Exposure Analysis (V3 + Valuation) ===")
     
     # Load YOLO model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -964,17 +863,14 @@ def main() -> None:
             try:
                 item = ready_queue.get(timeout=5)
             except queue.Empty:
-                # Check if all workers have stopped
                 if active_workers == 0:
                     break
                 continue
             
-            # Check for worker shutdown signal
             if item is None:
                 active_workers -= 1
                 continue
             
-            # Check for download error
             if item.get('path') is None or item.get('error'):
                 video_id = item['meta'].get('video_id', 'unknown')
                 logger.warning(
@@ -990,13 +886,27 @@ def main() -> None:
             video_path = item['path']
             video_id = item['meta'].get('video_id', 'unknown')
             
+            # Safely extract view_count
             try:
-                # Set processing timeout
-                metrics, v_meta = process_video_batched(video_path, model)
+                raw_views = item['meta'].get('view_count', 0)
+                # Handle potentially formatted strings like "1,000" or NaN
+                if pd.isna(raw_views):
+                    view_count = 0
+                elif isinstance(raw_views, str):
+                    # Basic cleanup for common formats (remove commas)
+                    view_count = int(float(raw_views.replace(',', '')))
+                else:
+                    view_count = int(raw_views)
+            except Exception:
+                logger.warning(f"Could not parse view_count for {video_id}, default to 0")
+                view_count = 0
+            
+            try:
+                # Pass view_count to processing function
+                metrics, v_meta = process_video_batched(video_path, model, view_count)
                 
                 # Generate results for each detected brand
                 for brand, stats in metrics.items():
-                    # Calculate exposure time
                     exp_sec = (
                         stats['frames'] * (v_meta['skip_interval'] / v_meta['fps'])
                         if v_meta['fps'] else 0
@@ -1017,6 +927,7 @@ def main() -> None:
                     sz_m, sz_s = ms('size_score')
                     sov_m, sov_s = ms('sov_weighted')
                     ds_m, ds_s = ms('dist_score')
+                    lg_m, lg_s = ms('legi_score')
                     
                     # Raw metrics
                     cf_m, cf_s = ms('conf')
@@ -1032,6 +943,10 @@ def main() -> None:
                         'exposure_seconds': round(exp_sec, 2),
                         'total_detections': d,
                         
+                        # Financial Value (Sum of all frames)
+                        'total_media_value': round(stats['media_value_sum'], 4),
+                        
+                        # Scientific Metrics
                         'qi_score_avg': round(qi_m, 4),
                         'qi_score_std': round(qi_s, 4),
                         'size_score_avg': round(sz_m, 4),
@@ -1040,7 +955,10 @@ def main() -> None:
                         'sov_weighted_std': round(sov_s, 4),
                         'dist_score_avg': round(ds_m, 4),
                         'dist_score_std': round(ds_s, 4),
+                        'legi_score_avg': round(lg_m, 4),
+                        'legi_score_std': round(lg_s, 4),
                         
+                        # Raw Metrics
                         'conf_avg': round(cf_m, 4),
                         'conf_std': round(cf_s, 4),
                         'laplacian_avg': round(lp_m, 2),
@@ -1055,7 +973,7 @@ def main() -> None:
                     
                 logger.info(
                     f"Successfully processed video {video_id}: "
-                    f"{len(metrics)} brands detected"
+                    f"{len(metrics)} brands detected. Views: {view_count}"
                 )
                     
             except Exception as e:
@@ -1063,7 +981,6 @@ def main() -> None:
                 failed_count += 1
                 
             finally:
-                # Clean up temporary video file
                 if os.path.exists(video_path):
                     try:
                         os.remove(video_path)
@@ -1073,18 +990,15 @@ def main() -> None:
                 processed_count += 1
                 pbar.update(1)
                 
-                # Save incrementally
                 if processed_count % SAVE_EVERY == 0:
                     if save_results_incremental(pending_results, OUTPUT_CSV):
                         logger.info(f"Saved {len(pending_results)} results")
                         pending_results = []
     
-    # Save any remaining results
     if pending_results:
         save_results_incremental(pending_results, OUTPUT_CSV)
         logger.info(f"Saved final {len(pending_results)} results")
     
-    # Final summary
     logger.info("=== Processing Complete ===")
     logger.info(f"Successfully processed: {processed_count - failed_count}/{len(tasks)}")
     logger.info(f"Failed: {failed_count}/{len(tasks)}")
