@@ -1,0 +1,16 @@
+Mean Target Value: $20,532
+--- Results for: Linear Regression ---
+MAE  : $16,378.84
+RMSE : $19,857.96
+R²   : 0.3870
+------------------------------
+--- Results for: XGBoost ---
+MAE  : $10,725.99
+RMSE : $17,896.97
+R²   : 0.5021
+------------------------------
+--- Results for: Random Forest ---
+MAE  : $10,080.23
+RMSE : $15,389.19
+R²   : 0.6319
+------------------------------
