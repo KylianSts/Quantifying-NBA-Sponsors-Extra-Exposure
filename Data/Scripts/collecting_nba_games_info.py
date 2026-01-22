@@ -28,7 +28,7 @@ import os
 # ============================================================================
 
 # Target NBA season to collect data format
-TARGET_SEASON = "2024-25"
+TARGET_SEASON = "2025-26"
 
 # Season type: "Regular Season", "Playoffs", "Pre Season", "All Star"
 SEASON_TYPE = "Regular Season"

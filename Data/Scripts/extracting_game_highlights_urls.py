@@ -5,9 +5,6 @@ This script automates the collection of YouTube highlight video URLs for a given
 list of NBA games. It operates in parallel to speed up the process and includes
 robust validation checks to ensure the relevance of collected videos.
 
-NEW: Resumability - automatically skips games that already have videos in the output CSV.
-This allows you to safely run the script multiple times without re-processing games.
-
 Key features:
 - Generates search queries from a CSV of NBA games.
 - Uses yt-dlp to search YouTube in parallel with multiple workers.
@@ -36,7 +33,7 @@ import csv
 GAMES_CSV_INPUT = "Data/exposure_and_game_info/nba_games_2025-26.csv"
 
 # Output CSV file where valid video URLs will be saved
-URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls_test.csv"
+URLS_CSV_OUTPUT = "Data/urls/game_highlight_urls_2025_26.csv"
 
 # Maximum number of search results to retrieve per game query
 MAX_RESULTS_PER_QUERY = 10
@@ -220,7 +217,7 @@ def fetch_video_metadata(video_id: str) -> Dict:
     Retrieves views, likes, comments, duration, and channel information.
     
     Args:
-        video_id: YouTube video ID (e.g., 'dQw4w9WgXcQ')
+        video_id: YouTube video ID 
     
     Returns:
         Dictionary containing video metadata:

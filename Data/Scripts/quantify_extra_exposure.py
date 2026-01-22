@@ -1,6 +1,5 @@
 """
-Brand Exposure Analysis System for Basketball Videos (V3 + Media Valuation)
-==========================================================================
+Brand Exposure Analysis System for Basketball Videos
 
 This system processes basketball game highlight videos to detect and measure
 brand logo exposure using computer vision and deep learning techniques.
@@ -47,7 +46,7 @@ BALL_CLASS_NAME = "basketball" # Class name for basketball detection
 INPUT_SIZE = 1024              # Input size for YOLO model
 
 # Valuation parameters
-CPV_REF = 0.00033              # Cost Per View reference (constant)
+CPV_REF = 0.00033              # Cost Per View reference
 FRAME_DURATION = 1.0 / TARGET_FPS # Duration of one frame (0.2s)
 
 # Tracking and fusion parameters
@@ -64,7 +63,7 @@ SAVE_EVERY = 5             # Save results every N videos
 # Timeout parameters
 DOWNLOAD_TIMEOUT = 600      # Timeout for video download (seconds)
 VIDEO_PROCESS_TIMEOUT = 3000  # Timeout for video processing (seconds)
-MAX_DOWNLOAD_RETRIES = 3   # Maximum download retry attempts
+MAX_DOWNLOAD_RETRIES = 1   # Maximum download retry attempts
 
 # GPU optimization
 torch.backends.cudnn.benchmark = True
@@ -119,9 +118,9 @@ def initialize_files() -> None:
             'exposure_seconds', 'total_detections',
             
             # Financial Metric
-            'total_media_value',                        # NEW: Sum of V_i,t
+            'total_media_value',                        
             
-            # Scientific metrics (QI Score V3)
+            # Scientific metrics
             'qi_score_avg', 'qi_score_std',
             
             # QI Score components
@@ -131,7 +130,7 @@ def initialize_files() -> None:
             'legi_score_avg', 'legi_score_std',         # Legibility score
 
             # Raw metrics for context
-            'conf_avg', 'conf_std',                     # AI confidence
+            'conf_avg', 'conf_std',                     # Model confidence
             'laplacian_avg', 'laplacian_std',           # Sharpness raw
             'dist_raw_pct_avg', 'dist_raw_pct_std',     # Raw distance to ball (%)
             'area_pct_avg', 'area_pct_std',             # Raw size (% of screen)
@@ -319,7 +318,6 @@ def consolidate_detections(
 def calculate_laplacian_variance(img_crop: np.ndarray) -> float:
     """
     Calculate image sharpness using Laplacian variance.
-    Higher values indicate sharper images.
     """
     try:
         if img_crop.size == 0:
@@ -387,7 +385,7 @@ def calculate_weighted_share_of_voice(
     Calculate weighted Share of Voice considering spatial crowding effect.
     """
     weighted_competitor_area = 0.0
-    sigma_crowd = 0.10  # 10% of screen = radius of influence
+    sigma_crowd = 0.10 
     
     for box_data in all_boxes_data:
         dist_px = np.linalg.norm(target_center - box_data['center'])
@@ -424,9 +422,7 @@ def calculate_final_scores(
     laplacian_val: float
 ) -> Dict[str, float]:
     """
-    Calculate comprehensive quality scores including Legibility.
-    
-    QI Formula V3 = Attention * Size * SoV * Legibility
+    Calculate comprehensive quality scores 
     """
     # Raw measurements
     dist_px = np.linalg.norm(logo_center - focal_point)
@@ -719,7 +715,7 @@ def _process_batch(
                 results[name] = {
                     'frames': 0,
                     'detections': 0,
-                    'media_value_sum': 0.0,  # <--- Accumulator for Media Value
+                    'media_value_sum': 0.0, 
                     
                     'qi_score_acc': 0.0, 'qi_score_sq': 0.0,
                     'size_score_acc': 0.0, 'size_score_sq': 0.0,
@@ -733,7 +729,7 @@ def _process_batch(
                     'area_pct_acc': 0.0, 'area_pct_sq': 0.0
                 }
             
-            # --- 1. CALCULATE LAPLACIAN FIRST ---
+            # --- 1. CALCULATE LAPLACIAN ---
             x_coords = boxes[j][:, 0]
             y_coords = boxes[j][:, 1]
             x_min = max(0, int(min(x_coords)))
@@ -795,7 +791,7 @@ def main() -> None:
     """Main entry point for the brand exposure analysis pipeline."""
     # Initialize environment
     initialize_files()
-    logger.info("=== Starting Brand Exposure Analysis (V3 + Valuation) ===")
+    logger.info("=== Starting Brand Exposure Analysis ===")
     
     # Load YOLO model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

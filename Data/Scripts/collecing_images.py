@@ -47,7 +47,6 @@ def process_single_video(url: str, output_dir: str, num_frames: int, sharpness_t
     
     Returns:
         Status message indicating success with frame count or detailed error information
-        Examples: "Completed: video_id (8/10 frames saved)" or "Error: File not found..."
     """
     filename = None  # Track downloaded file for cleanup
     cap = None       # Track video capture object for proper release
@@ -212,10 +211,6 @@ def download_and_extract_frames(urls: list, output_dir: str, num_frames: int,
     """
     Download YouTube videos and extract random sharp frames with rate limiting.
     
-    This function processes multiple videos while respecting YouTube's rate limits.
-    The sequential processing (max_workers=1) is CRITICAL when using cookie authentication
-    to avoid HTTP 403 errors.
-    
     Args:
         urls: List of YouTube video URLs to process
         output_dir: Directory where extracted frames will be saved (created if doesn't exist)
@@ -223,8 +218,6 @@ def download_and_extract_frames(urls: list, output_dir: str, num_frames: int,
         sharpness_threshold: Minimum Laplacian variance for frame quality (default: 300.0)
                            Higher values = stricter quality requirements
         max_workers: Number of videos to process simultaneously (default: 1)
-                    IMPORTANT: Keep at 1 when using cookies to avoid 403 errors
-                    Can increase to 5-10 if not using cookie authentication
     
     Returns:
         None (prints progress and results to console)
@@ -259,27 +252,22 @@ def download_and_extract_frames(urls: list, output_dir: str, num_frames: int,
 if __name__ == "__main__":
     
     # Define sharpness threshold for high-quality frames
-    # 150.0 is a balanced value: not too strict (which would reject many frames)
-    # but strict enough to filter out blurry or low-quality frames
-    # Adjust based on your dataset needs: 100-200 for more frames, 200-400 for only very sharp frames
-    HIGH_QUALITY_THRESHOLD = 150.0 
+    HIGH_QUALITY_THRESHOLD = 200.0 
 
     try:
         # === TRAINING SET EXTRACTION ===
         # Load training video URLs from file
         with open('Data/urls/train_urls.txt', 'r') as f:
             # Strip whitespace and filter out empty lines
-            train_urls = [line.strip() for line in f.readlines() if line.strip()]
-            
+            train_urls = [line.strip() for line in f.readlines() if line.strip()]    
         print(f"Starting extraction for {len(train_urls)} training videos...")
+        
         download_and_extract_frames(
             urls=train_urls,
-            output_dir="Data/images/train_images_quality",
-            num_frames=10,  # Extract 10 frames per video
+            output_dir="Data/images/train_images_quality_2",
+            num_frames=50,  # Extract 10 frames per video
             sharpness_threshold=HIGH_QUALITY_THRESHOLD,
-            max_workers=12  # Process 12 videos in parallel
-                           # WARNING: High values with cookies may trigger 403 errors
-                           # Reduce to 1 if you encounter authentication issues
+            max_workers=12  # Process videos in parallel
         ) 
 
         # === TEST SET EXTRACTION ===

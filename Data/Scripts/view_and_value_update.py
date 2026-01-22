@@ -1,6 +1,5 @@
 """
 Double Updater: YouTube Stats & Media Value Recalculation
-=========================================================
 
 This script performs two critical functions:
 1. Updates the "Urls & Stats" CSV with the latest live view counts from YouTube.
@@ -37,7 +36,7 @@ RESULTS_CSV_OUTPUT = "Data/exposure_and_game_info/exposure_results_2025_26_UPDAT
 
 # Performance Settings
 MAX_WORKERS = 32       # Number of simultaneous checks
-REQUEST_DELAY = 0    # Delay to avoid rate limits
+REQUEST_DELAY = 1    # Delay to avoid rate limits
 SAVE_EVERY = 50        # Save progress frequency
 
 # ============================================================================
@@ -55,8 +54,8 @@ def get_latest_stats(video_id: str):
         'no_warnings': True,
         'extract_flat': False, # Need full info for live view counts
         'skip_download': True,
-        'ignoreerrors': True,  # Critical: Don't crash on banned videos
-        'cookiesfrombrowser': ('firefox',), # Optional: helps with restricted videos
+        'ignoreerrors': True,  # Don't crash on banned videos
+        'cookiesfrombrowser': ('firefox',),
     }
 
     try:
@@ -102,7 +101,7 @@ def process_view_update(row_tuple):
         elif "youtu.be/" in url:
             video_id = url.split("youtu.be/")[1].split("?")[0]
             
-    updated_data['video_id'] = video_id # Ensure ID is set
+    updated_data['video_id'] = video_id 
 
     if video_id:
         stats = get_latest_stats(str(video_id))
